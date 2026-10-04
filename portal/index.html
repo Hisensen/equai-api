@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="EQUAI 视频生成开发者控制台">
+  <title>equai</title>
+  <link rel="icon" type="image/png" sizes="256x256" href="/equai-favicon-r34.png">
+  <link rel="apple-touch-icon" href="/equai-favicon-r34.png">
+  <script src="/theme-init.js?v=r96-theme-price"></script>
+  <link rel="stylesheet" href="/styles.css?v=r113-app-grid">
+  <link rel="stylesheet" href="/creative.css?v=r112-commerce-depth">
+</head>
+<body class="auth-mode">
+  <div class="visual-backdrop" aria-hidden="true">
+    <video id="ambientVideo" class="ambient-video login-ambient-video" autoplay muted loop playsinline preload="none" poster="/equai-login-bg-poster.webp?v=r34" data-webm="/equai-login-bg.webm?v=r34" data-mp4="/equai-login-bg.mp4?v=r34"></video>
+    <video id="consoleAmbientVideo" class="ambient-video console-ambient-video" autoplay muted loop playsinline preload="none" poster="/equai-bg-poster.webp" data-webm="/equai-bg.webm" data-mp4="/equai-bg.mp4"></video>
+    <div class="ambient-shade"></div>
+    <div class="ambient-glow glow-a"></div><div class="ambient-glow glow-b"></div>
+    <div class="ambient-motes"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="film-grain"></div>
+  </div>
+  <header class="topbar">
+    <div class="brand"><img class="brand-wordmark" src="/equai-mark-white.png" alt="equai"></div>
+    <span class="brand-slogan">平等&nbsp; | &nbsp;平价&nbsp; | &nbsp;不平凡</span>
+    <button id="themeToggle" class="theme-toggle" type="button" aria-label="切换到浅色模式" title="切换到浅色模式" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg><span>浅色</span></button>
+    <div class="top-actions">
+      <button id="logoutBtn" class="btn ghost small hidden">退出</button>
+    </div>
+  </header>
+
+  <main id="authView" class="auth-shell">
+    <section class="auth-story">
+      <div class="auth-copy">
+        <div class="eyebrow">平等 · 平价 · 不平凡</div>
+        <h1>EQUAI</h1>
+        <p>让 AI 平等地改变每一个人的生活</p>
+        <span>Video generation infrastructure</span>
+      </div>
+      <div class="bridge-stage" aria-hidden="true">
+        <div class="orb orb-one"></div><div class="orb orb-two"></div>
+        <svg viewBox="0 0 920 430" focusable="false">
+          <defs>
+            <linearGradient id="bridgeGradient" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#65e8ff"/><stop offset=".55" stop-color="#6d91ff"/><stop offset="1" stop-color="#ad7cff"/></linearGradient>
+            <radialGradient id="nodeGradient"><stop stop-color="#dffbff"/><stop offset=".35" stop-color="#7de8ff"/><stop offset="1" stop-color="#5672ff"/></radialGradient>
+            <filter id="bridgeGlow" x="-40%" y="-80%" width="180%" height="260%"><feGaussianBlur stdDeviation="7" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+            <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="16"/></filter>
+          </defs>
+          <g class="network-lines" fill="none" stroke="#558dff" stroke-width="1">
+            <path d="M30 368C180 300 270 397 450 351S715 311 890 368"/><path d="M12 393c180-82 335 38 468-11s278-72 430-5"/><path d="M80 414c171-53 287 13 423-26s262-17 373 20"/>
+          </g>
+          <g class="human-node" transform="translate(78 267)" filter="url(#bridgeGlow)">
+            <circle cx="0" cy="0" r="25" fill="url(#nodeGradient)"/><path d="M-43 83c4-42 19-63 43-63s39 21 43 63z" fill="url(#nodeGradient)"/>
+          </g>
+          <g class="bridge" fill="none" stroke="url(#bridgeGradient)" stroke-linecap="round" filter="url(#bridgeGlow)">
+            <path class="bridge-deck" d="M130 351H764" stroke-width="7"/><path d="M246 350V139M595 350V139" stroke-width="8"/>
+            <path class="bridge-cable" d="M130 345c57 0 104-17 116-206 21 123 92 197 174 201 82-4 153-78 175-201 12 189 61 206 169 206" stroke-width="4"/>
+            <g stroke-width="2" opacity=".82"><path d="M264 194v156M288 240v110M316 278v72M347 306v44M383 329v21M456 325v25M493 302v48M528 265v85M561 220v130M617 191v159M645 244v106M679 288v62M718 323v27"/></g>
+            <path class="bridge-flow" d="M130 351H764" stroke="#e8fbff" stroke-width="2"/>
+          </g>
+          <g class="ai-node" transform="translate(812 317)">
+            <circle r="68" fill="#355bff" opacity=".13" filter="url(#softGlow)"/><g fill="none" stroke="url(#bridgeGradient)" stroke-width="2.2" filter="url(#bridgeGlow)"><ellipse rx="61" ry="27" transform="rotate(12)"/><ellipse rx="61" ry="27" transform="rotate(72)"/><ellipse rx="61" ry="27" transform="rotate(132)"/></g><circle r="37" fill="#07162a" stroke="#7de8ff" stroke-width="2"/><text y="12" text-anchor="middle" fill="#eafcff" font-size="36" font-family="Arial, sans-serif" font-weight="700">AI</text>
+          </g>
+        </svg>
+      </div>
+    </section>
+    <section class="auth-panel">
+      <div class="auth-stack">
+        <div class="auth-card">
+          <div class="auth-card-brand"><img src="/equai-mark-white.png" alt="equai"><span>平等&nbsp; | &nbsp;平价&nbsp; | &nbsp;不平凡</span></div>
+          <div class="switcher">
+            <button data-auth="login" class="active">登录</button>
+            <button data-auth="register">注册</button>
+          </div>
+          <form id="loginForm">
+            <div class="eyebrow">Merchant access</div>
+            <h2>欢迎回来</h2>
+            <p class="form-intro">登录您的账户以访问 EQUAI 控制台</p>
+            <div class="field"><label for="loginUsername">登录名</label><input id="loginUsername" autocomplete="username" required></div>
+            <div class="field"><label for="loginPassword">密码</label><div class="password-field"><input id="loginPassword" type="password" autocomplete="current-password" required><button type="button" data-toggle-password="loginPassword" aria-label="显示密码"><span></span></button></div></div>
+            <div id="loginError" class="form-error"></div>
+            <button class="btn primary full" type="submit">登录控制台</button>
+          </form>
+          <form id="registerForm" class="hidden">
+            <div class="eyebrow">Create merchant identity</div>
+            <h2>注册商户身份</h2>
+            <p class="form-intro">创建身份后，将商户 ID 发给管理员开通积分</p>
+            <div class="field"><label for="regUsername">登录名</label><input id="regUsername" minlength="4" maxlength="32" autocomplete="username" required><small class="muted">无需手机号或邮箱</small></div>
+            <div class="field"><label for="regPassword">密码</label><div class="password-field"><input id="regPassword" type="password" minlength="10" autocomplete="new-password" required><button type="button" data-toggle-password="regPassword" aria-label="显示密码"><span></span></button></div></div>
+            <div id="registerError" class="form-error"></div>
+            <button class="btn primary full" type="submit">创建账户</button>
+          </form>
+        </div>
+        <aside class="auth-community">
+          <div><div class="eyebrow">Equai community</div><h2>有问题？联系我们</h2><p>扫码进入商户群，沟通 API 接入与任务问题。</p></div>
+          <button class="community-trigger open-community" type="button"><span>联系我们</span><i>↗</i></button>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <main id="consoleView" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand"><img src="/equai-mark-white.png" alt="equai"><span>平等&nbsp; | &nbsp;平价&nbsp; | &nbsp;不平凡</span></div>
+      <div class="identity"><div><span>可用账户</span><strong id="merchantName">—</strong><code id="merchantId">—</code></div></div>
+      <nav class="nav" aria-label="控制台导航">
+        <div class="nav-group">
+          <span class="nav-group-label">账户</span>
+          <button data-page="overview" class="active"><span class="nav-symbol">◫</span><span>总览</span></button>
+        </div>
+        <div class="nav-group">
+          <span class="nav-group-label">创作应用</span>
+          <button data-page="apps"><span class="nav-symbol">✦</span><span>应用</span></button>
+        </div>
+        <div class="nav-group">
+          <span class="nav-group-label">开发者</span>
+          <button data-page="api"><span class="nav-symbol">&lt;/&gt;</span><span>API 接入</span></button>
+        </div>
+      </nav>
+    </aside>
+    <section class="content">
+      <div id="page-overview" class="page">
+        <div class="page-head"><div><div class="eyebrow">Account telemetry</div><h1>账户总览</h1></div><span id="accountStatus" class="status">—</span></div>
+        <div id="pendingNotice" class="notice hidden">账户尚未开通。把商户 ID 发给管理员并完成线下付款，管理员充值后 API 权限会自动启用。</div>
+        <div class="metric-grid">
+          <article class="metric primary-metric"><span class="label">可用积分</span><span id="balance" class="number">0.000</span><div class="credit-rail"><span id="balanceRail"></span></div></article>
+          <article class="metric"><span class="label">冻结中</span><span id="reserved" class="number">0.000</span></article>
+          <article class="metric"><span class="label">成功任务</span><span id="completedCount" class="number">0</span></article>
+          <article class="metric"><span class="label">进行中</span><span id="activeCount" class="number">0</span></article>
+        </div>
+        <div class="overview-record-switch" role="tablist" aria-label="账户记录类型">
+          <button type="button" role="tab" data-overview-record="calls" aria-selected="true">调用记录</button>
+          <button type="button" role="tab" data-overview-record="ledger" aria-selected="false">积分明细</button>
+        </div>
+        <section id="pointsLedger" class="panel overview-ledger-panel hidden" role="tabpanel" aria-label="积分明细">
+          <div class="panel-head">
+            <div class="overview-call-copy"><h2>积分明细</h2><small>账户余额的充值、冻结、扣除和退回记录</small></div>
+            <span class="ledger-period">最近记录</span>
+          </div>
+          <div id="ledgerTable"><div class="empty">正在读取积分明细…</div></div>
+          <div class="ledger-more-wrap"><button id="ledgerMore" class="btn small hidden" type="button">加载更多</button></div>
+        </section>
+        <section id="callHistory" class="panel overview-call-panel" role="tabpanel" aria-label="调用记录">
+          <div class="panel-head">
+            <div class="overview-call-copy"><h2>调用记录</h2><small>任务结果、运行时间和扣分记录</small></div>
+            <select id="callFilter" class="btn" aria-label="按任务状态筛选"><option value="">全部状态</option><option value="queued">排队</option><option value="running">运行中</option><option value="completed">成功</option><option value="failed">失败</option><option value="cancelled">已取消</option></select>
+          </div>
+          <div class="call-retention-note">视频过期后，任务状态、运行时间、扣分和失败原因仍会保留。</div>
+          <div id="callTable"><div class="empty">正在读取调用记录…</div></div>
+        </section>
+        <section class="panel support-panel">
+          <div class="support-copy">
+            <div class="eyebrow">Merchant support</div>
+            <h2>有问题？扫码进群</h2>
+            <p>API 接入、任务异常或使用问题，都可以在群里沟通。二维码失效后请刷新页面查看更新版本。</p>
+          </div>
+          <button class="community-trigger open-community" type="button"><span>打开群二维码</span><i>↗</i></button>
+        </section>
+      </div>
+
+      <div id="page-apps" class="page hidden">
+        <div class="page-head apps-page-head">
+          <div><div class="eyebrow">Creative workspace</div><h1>应用</h1><p>选择一个工具开始创作；任务共用账户余额和并发。</p></div>
+          <span class="apps-count">7 个创作工具</span>
+        </div>
+        <div class="app-launch-grid">
+          <button class="app-launch-card" type="button" data-open-app="studio">
+            <span class="app-launch-mark"><img src="/app-icon-video-create-r95.png" alt=""></span><span class="app-launch-copy"><small>VIDEO · CREATE</small><strong>视频生成</strong><span>文生视频、首尾帧、多参考，一处完成。</span></span><span class="app-launch-arrow" aria-hidden="true">↗</span>
+          </button>
+          <button class="app-launch-card" type="button" data-open-app="commerce-remix">
+            <span class="app-launch-mark"><img src="/app-icon-video-remix-r95.png" alt=""></span><span class="app-launch-copy"><small>VIDEO · E-COMMERCE REMIX</small><strong>电商复刻</strong><span>多帧分析原片，按人物、商品、场景参考图生成新视频。</span></span><span class="app-launch-arrow" aria-hidden="true">↗</span>
+          </button>
+          <button class="app-launch-card" type="button" data-open-app="digital-human">
+          <span class="app-launch-mark"><img src="/app-icon-digital-human-r1.png" alt=""></span><span class="app-launch-copy"><small>VIDEO · DIGITAL HUMAN</small><strong>数字人</strong><span>上传人物图片和音频，用多参考生成口型同步视频。</span></span><span class="app-launch-arrow" aria-hidden="true">↗</span>
+        </button>
+        <button class="app-launch-card" type="button" data-open-app="digital-human2">
+          <span class="app-launch-mark"><img src="/app-icon-digital-human-r1.png" alt=""></span><span class="app-launch-copy"><small>VIDEO · DIGITAL HUMAN 2</small><strong>数字人 2</strong><span>用 selflift-Avatar 实验路径生成口型同步视频。</span></span><span class="app-launch-arrow" aria-hidden="true">↗</span>
+        </button>
+          <button class="app-launch-card" type="button" data-open-app="editor">
+            <span class="app-launch-mark"><img src="/app-icon-video-edit-r95.png" alt=""></span><span class="app-launch-copy"><small>VIDEO · EDIT</small><strong>视频编辑</strong><span>上传视频、编号参考图，用 Prompt 描述修改。</span></span><span class="app-launch-arrow" aria-hidden="true">↗</span>
+          </button>
+          <button class="app-launch-card" type="button" data-open-app="image-edit">
+            <span class="app-launch-mark"><img src="/app-icon-image-edit-r95.png" alt=""></span><span class="app-launch-copy"><small>IMAGE · EDIT</small><strong>图片编辑</strong><span>上传图片并描述修改目标，生成新的画面。</span></span><span class="app-launch-arrow" aria-hidden="true">↗</span>
+          </button>
+          <button class="app-launch-card" type="button" data-open-app="music">
+            <span class="app-launch-mark"><img src="/app-icon-music-edit-r1.png" alt=""></span><span class="app-launch-copy"><small>AUDIO · EDIT</small><strong>音乐编辑</strong><span>上传音频，调整风格与人声，生成新的演唱版本。</span></span><span class="app-launch-arrow" aria-hidden="true">↗</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="page-digital-human2" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">视频创作</div><h1>数字人 2</h1><p class="muted">上传一张人物参考图和一段音频，使用独立的 selflift-Avatar 路径生成口型同步视频。</p></div></div>
+        <div class="creative-shell">
+          <form id="digitalHuman2Form" class="panel creative-form">
+            <div class="creative-source"><label for="digitalHuman2Image">人物参考图 <span class="muted">必选 · 仅一张</span></label><input id="digitalHuman2Image" type="file" accept="image/png,image/jpeg,image/webp" required><div id="digitalHuman2ImagePreview" class="creative-image-previews"><p class="muted">上传清晰正脸或半身人物照片。</p></div><small class="muted">请确保你有权使用该人物形象及其声音素材。</small></div>
+            <div class="creative-controls">
+              <div class="field"><label for="digitalHuman2Audio">原始音频 <span class="muted">必选</span></label><input id="digitalHuman2Audio" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/x-m4a,audio/flac,.mp3,.wav,.m4a,.flac,.aac,.ogg" required><small id="digitalHuman2AudioInfo" class="muted">支持 1–60 秒；生成后保留完整原始上传声音。</small></div>
+              <div class="field"><label for="digitalHuman2Emotion">额外提示词（可选）</label><textarea id="digitalHuman2Emotion" rows="3" maxlength="1000" placeholder="如有其他要求，可在这里补充"></textarea></div>
+              <div class="field"><label for="digitalHuman2Ratio">画幅</label><select id="digitalHuman2Ratio"><option value="9:16">竖屏 · 9:16</option><option value="16:9">横屏 · 16:9</option></select></div>
+              <p id="digitalHuman2Price" class="creative-price">按视频时长分段计费；生成失败退还积分。</p><p id="digitalHuman2Error" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始生成</button>
+            </div>
+          </form>
+          <section class="panel creative-results"><div class="panel-head"><h2>生成记录</h2><button class="btn small" type="button" data-creative-refresh="digital-human2">刷新</button></div><div id="digitalHuman2Tasks" aria-live="polite"><div class="empty">创建数字人 2 任务后，结果会显示在这里。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-commerce-remix" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">视频创作</div><h1>电商复刻</h1><p class="muted">上传原视频和想替换的人物、商品或场景图片，生成保留原片节奏与声音的新视频。</p></div></div>
+        <div class="creative-shell">
+          <form id="commerceRemixForm" class="panel creative-form">
+            <div class="creative-source">
+              <label for="commerceRemixVideo">原视频 <span class="muted">必选 · 5–15 秒</span></label>
+              <input id="commerceRemixVideo" type="file" accept="video/*,.mp4,.mov,.m4v,.webm,.3gp,.mkv,.avi" required>
+              <div id="commerceRemixSourcePreview" class="creative-source-preview"><p class="muted">上传后可预览原片；生成时长自动跟随原片。</p></div>
+              <small id="commerceRemixVideoInfo" class="muted">最长 300 MB，支持横屏和竖屏视频。</small>
+            </div>
+            <div class="creative-controls">
+              <h2>可选参考图片</h2>
+              <p class="muted">分别上传想替换的人物、商品或场景图片；未上传的内容由系统自动生成。</p>
+              <div class="creative-role-grid commerce-remix-roles">
+                <div class="creative-role"><div class="creative-role-head"><label for="commerceRemixPerson">人物</label><span data-role-status>可选</span></div><input id="commerceRemixPerson" type="file" accept="image/*,.heic,.heif" data-commerce-role="person"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="commerceRemixPerson">清除</button></div>
+                <div class="creative-role"><div class="creative-role-head"><label for="commerceRemixProduct">商品</label><span data-role-status>可选</span></div><input id="commerceRemixProduct" type="file" accept="image/*,.heic,.heif" data-commerce-role="product"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="commerceRemixProduct">清除</button></div>
+                <div class="creative-role"><div class="creative-role-head"><label for="commerceRemixScene">场景</label><span data-role-status>可选</span></div><input id="commerceRemixScene" type="file" accept="image/*,.heic,.heif" data-commerce-role="scene"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="commerceRemixScene">清除</button></div>
+              </div>
+              <p class="creative-price">每条视频 1.5 pt，成功后扣除；失败退回积分。</p>
+              <small class="muted">保留原片声音，输出最长 15 秒。请使用常见横屏或竖屏视频。</small>
+              <p id="commerceRemixError" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始电商复刻</button>
+            </div>
+          </form>
+          <section class="panel creative-results"><div class="panel-head"><h2>生成记录</h2><button class="btn small" type="button" data-creative-refresh="commerce-remix">刷新</button></div><div id="commerceRemixTasks" aria-live="polite"><div class="empty">上传视频后，生成结果会显示在这里。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-digital-human" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">视频创作</div><h1>数字人</h1><p class="muted">上传一张人物参考图和一段音频，生成嘴型同步的口播视频。</p></div></div>
+        <div class="creative-shell">
+          <form id="digitalHumanForm" class="panel creative-form">
+            <div class="creative-source"><label for="digitalHumanImage">人物参考图 <span class="muted">必选 · 仅一张</span></label><input id="digitalHumanImage" type="file" accept="image/png,image/jpeg,image/webp" required><div id="digitalHumanImagePreview" class="creative-image-previews"><p class="muted">上传清晰正脸或半身人物照片。</p></div><small class="muted">请确保你有权使用该人物形象及其声音素材。</small></div>
+            <div class="creative-controls">
+              <div class="field"><label for="digitalHumanAudio">原始音频 <span class="muted">必选</span></label><input id="digitalHumanAudio" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/x-m4a,audio/flac,.mp3,.wav,.m4a,.flac,.aac,.ogg" required><small id="digitalHumanAudioInfo" class="muted">支持 1–60 秒；15 秒以内一次生成，超过 15 秒按 15 秒一段拆分；成片使用完整原始上传声音。</small></div>
+              <div class="field"><label for="digitalHumanEmotion">额外提示词（可选）</label><textarea id="digitalHumanEmotion" rows="3" maxlength="1000" placeholder="如有其他要求，可在这里补充"></textarea></div>
+              <div class="field"><label for="digitalHumanRatio">画幅</label><select id="digitalHumanRatio"><option value="9:16">竖屏 · 9:16</option><option value="16:9">横屏 · 16:9</option></select></div>
+              <p id="digitalHumanPrice" class="creative-price">按视频时长分段计费；生成失败退还积分。</p><p id="digitalHumanError" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始生成</button>
+            </div>
+          </form>
+          <section class="panel creative-results"><div class="panel-head"><h2>生成记录</h2><button class="btn small" type="button" data-creative-refresh="digital-human">刷新</button></div><div id="digitalHumanTasks" aria-live="polite"><div class="empty">创建数字人任务后，结果会显示在这里。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-remix2" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">E-commerce remix 2</div><h1>电商视频复刻 2</h1><p class="muted">保留原片节奏和声音，根据你上传的人物、商品或场景图片生成新视频。</p></div></div>
+        <div class="creative-shell">
+        <form id="remix2Form" class="panel creative-form">
+          <div class="creative-source">
+            <label for="remix2Video">参考视频 <span class="muted">必选 · 5–15 秒</span></label>
+            <input id="remix2Video" type="file" accept="video/*,.mp4,.mov,.m4v,.webm,.3gp,.mkv,.avi" required>
+            <div id="remix2SourcePreview" class="creative-source-preview"><p class="muted">选择视频后会自动分析镜头和对白。</p></div>
+            <small id="remix2VideoInfo" class="muted">输出时长严格按原视频时长截取。</small>
+          </div>
+          <div class="creative-controls">
+            <div class="field remix-template-picker"><label for="remix2Template">按什么内容替换？</label><select id="remix2Template">
+              <option value="person">只换人物</option><option value="product">只换商品</option><option value="scene">只换场景</option><option value="person_product">人物＋商品</option><option value="person_scene">人物＋场景</option><option value="product_scene">商品＋场景</option><option value="all">人物＋商品＋场景</option>
+            </select></div>
+            <h2>上传用途图片</h2>
+            <div class="creative-role-grid">
+              <div class="creative-role" data-role-card="person" data-remix2-role-card><div class="creative-role-head"><label for="remix2Person">人物</label><span data-role-status>必选</span></div><input id="remix2Person" type="file" accept="image/*,.heic,.heif" data-remix2-role="person"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="remix2Person">清除</button></div>
+              <div class="creative-role" data-role-card="product" data-remix2-role-card hidden><div class="creative-role-head"><label for="remix2Product">商品</label><span data-role-status>必选</span></div><input id="remix2Product" type="file" accept="image/*,.heic,.heif" data-remix2-role="product"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="remix2Product">清除</button></div>
+              <div class="creative-role" data-role-card="scene" data-remix2-role-card hidden><div class="creative-role-head"><label for="remix2Scene">场景</label><span data-role-status>必选</span></div><input id="remix2Scene" type="file" accept="image/*,.heic,.heif" data-remix2-role="scene"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="remix2Scene">清除</button></div>
+            </div>
+            <div class="creative-options"><p class="creative-price" id="remix2Price">本次需要 1.5 pt</p></div>
+            <small class="muted">自动保留原视频对白和声音，并按原视频时长交付。</small>
+            <p id="remix2Error" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始复刻 2</button>
+          </div>
+        </form>
+        <section class="panel creative-results"><div class="panel-head"><h2>复刻 2 记录</h2><button class="btn small" type="button" data-creative-refresh="remix2">刷新</button></div><div id="remix2Tasks" aria-live="polite"><div class="empty">上传参考视频，开始你的第一次复刻 2。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-studio" class="page hidden">
+        <div class="page-head studio-page-head">
+          <div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">Video workspace</div><h1>视频生成</h1><p>在控制台内直接创建任务，与 API 调用共用账户余额、并发和调用记录。</p></div>
+          <div class="studio-balance"><span>可用余额</span><strong id="studioBalance">0.000</strong><small>pt</small></div>
+        </div>
+
+        <div class="studio-shell">
+          <section class="studio-compose">
+            <form id="videoAppForm">
+              <div class="studio-section studio-mode-section">
+                <div class="studio-section-head"><span>生成方式</span><small>选择素材如何参与画面</small></div>
+                <div class="studio-mode-tabs" role="tablist" aria-label="视频生成方式">
+                  <button class="active" type="button" data-studio-kind="text">文生视频</button>
+                  <button type="button" data-studio-kind="image">首帧 / 首尾帧</button>
+                  <button type="button" data-studio-kind="reference">多参考</button>
+                </div>
+              </div>
+
+              <div class="studio-section studio-quality-section">
+                <div class="studio-section-head"><span>输出清晰度</span><small>系统会自动使用对应服务规格</small></div>
+                <div class="quality-choice">
+                  <label><input type="radio" name="app_quality" value="720p" checked><span><b>720P</b><em>1 pt / 条</em><small>失败全额退回</small></span></label>
+                  <label><input type="radio" name="app_quality" value="1080p"><span><b>1080P</b><em>2 pt / 条</em><small>失败全额退回</small></span></label>
+                  <label><input type="radio" name="app_quality" value="2k"><span><b>2K</b><em>3 pt / 条</em><small>失败全额退回</small></span></label>
+                </div>
+              </div>
+
+              <div id="studio-image-assets" class="studio-section studio-assets hidden">
+                <div class="studio-section-head"><span>关键画面</span><small>首帧必选，尾帧可选</small></div>
+                <div class="upload-pair">
+                  <label class="upload-slot keyframe-slot"><input id="studioFirstFrame" type="file" accept="image/*"><img id="studioFirstPreview" class="upload-preview hidden" alt="首帧预览"><strong>添加首帧</strong><small id="studioFirstName">决定视频从哪里开始</small></label>
+                  <label class="upload-slot keyframe-slot"><input id="studioLastFrame" type="file" accept="image/*"><img id="studioLastPreview" class="upload-preview hidden" alt="尾帧预览"><strong>添加尾帧</strong><small id="studioLastName">可选，决定视频在哪里结束</small></label>
+                </div>
+              </div>
+
+              <div id="studio-reference-assets" class="studio-section studio-assets hidden">
+                <div class="studio-section-head"><span>参考素材</span><small>最多 12 个，顺序即模型编号</small></div>
+                <div class="reference-upload-grid">
+                  <label class="upload-slot compact"><input id="studioRefImages" type="file" accept="image/*" multiple><strong>添加图片</strong><small>最多 9 张</small></label>
+                  <label class="upload-slot compact"><input id="studioRefVideos" type="file" accept="video/*" multiple><strong>添加视频</strong><small>最多 3 段</small></label>
+                  <label class="upload-slot compact"><input id="studioRefAudios" type="file" accept="audio/*" multiple><strong>添加音频</strong><small>最多 3 段</small></label>
+                </div>
+                <div id="studioReferenceList" class="reference-file-list"><div class="empty-reference">还没有添加参考素材</div></div>
+              </div>
+
+              <div class="studio-section prompt-section">
+                <div class="studio-section-head"><label for="studioPrompt">画面描述</label><small id="studioPromptHint">描述画面、动作、镜头和声音</small></div>
+                <textarea id="studioPrompt" maxlength="30000" required placeholder="例如：雨夜的城市街头，霓虹灯倒映在湿漉漉的地面上，镜头平稳跟随人物向前走……"></textarea>
+              </div>
+
+              <div class="studio-section studio-note-section">
+                <div class="studio-section-head"><label for="studioNote">视频备注</label><small>可选，用来区分相似结果</small></div>
+                <input id="studioNote" maxlength="80" placeholder="例如：手机壳方案 A">
+              </div>
+
+              <div class="studio-settings">
+                <label>时长<select id="studioDuration"><option value="5">5 秒</option><option value="6">6 秒</option><option value="7">7 秒</option><option value="8">8 秒</option><option value="9">9 秒</option><option value="10">10 秒</option><option value="11">11 秒</option><option value="12">12 秒</option><option value="13">13 秒</option><option value="14">14 秒</option><option value="15" selected>15 秒</option></select></label>
+                <label>画幅<select id="studioRatio"><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option></select></label>
+                <label>随机种子<input id="studioSeed" type="number" min="0" max="2147483647" value="0"><small>0 表示每次不同</small></label>
+              </div>
+
+              <div id="studioFormError" class="form-error"></div>
+              <button id="studioSubmit" class="btn primary studio-submit" type="submit"><span>创建视频</span><small id="studioSubmitPrice">将冻结 1 pt</small></button>
+            </form>
+          </section>
+
+          <aside class="studio-result">
+            <div class="result-stage" id="studioResultStage">
+              <div id="studioResultEmpty" class="result-empty"><span>▶</span><strong>生成结果会出现在这里</strong><small>提交后可以离开本页，任务会继续运行</small></div>
+              <video id="studioVideo" controls playsinline class="hidden"></video>
+            </div>
+            <div class="result-progress">
+              <div class="result-progress-head"><div><span id="studioTaskState">准备就绪</span><code id="studioTaskId">尚未创建任务</code></div><strong id="studioProgressValue">0%</strong></div>
+              <div class="result-progress-rail"><i id="studioProgressBar"></i></div>
+              <p id="studioTaskMessage">选择生成方式和清晰度，填写描述后创建视频。</p>
+              <div id="studioResultActions" class="result-actions hidden">
+                <a id="studioDownload" class="btn primary" target="_blank" rel="noopener">下载视频</a>
+                <button class="btn" type="button" data-go="overview" data-scroll-target="callHistory">查看调用记录</button>
+              </div>
+            </div>
+            <section class="studio-task-center" aria-labelledby="studioTaskCenterTitle">
+              <div class="task-center-head">
+                <div><strong id="studioTaskCenterTitle">生成队列</strong><small id="studioTaskSummary">正在读取任务…</small></div>
+                <button id="studioRefreshTasks" class="task-refresh" type="button" aria-label="刷新任务列表">刷新</button>
+              </div>
+              <div id="studioTaskList" class="studio-task-list" aria-live="polite">
+                <div class="task-center-empty">正在读取任务…</div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </div>
+
+      <div id="page-remix" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">E-commerce remix</div><h1>电商复刻</h1><p class="muted">remix（支持视频编辑）· 一次调用完成替换：原视频负责镜头、动作和节奏，参考图只负责对应对象。</p></div></div>
+        <div class="creative-shell">
+        <form id="remixForm" class="panel creative-form">
+          <div class="creative-source">
+            <label for="remixVideo">参考视频 <span class="muted">必选 · 5–15 秒</span></label>
+            <input id="remixVideo" type="file" accept="video/*,.mp4,.mov,.m4v,.webm,.3gp,.mkv,.avi" required>
+            <div id="remixSourcePreview" class="creative-source-preview"><p class="muted">上传一条横屏或竖屏视频，先在这里确认原片。</p></div>
+            <small id="remixVideoInfo" class="muted">支持 16:9、9:16，最大 300 MB。生成时长跟随原片。</small>
+          </div>
+          <div class="creative-controls">
+            <div class="field remix-template-picker">
+              <label for="remixTemplate">你想替换什么？</label>
+              <select id="remixTemplate">
+                <option value="person">只换人物</option>
+                <option value="product">只换商品</option>
+                <option value="scene">只换场景</option>
+                <option value="person_product">人物＋商品</option>
+                <option value="person_scene">人物＋场景</option>
+                <option value="product_scene">商品＋场景</option>
+                <option value="all">人物＋商品＋场景</option>
+              </select>
+            </div>
+            <h2>上传参考图片</h2>
+            <div class="creative-role-grid">
+              <div class="creative-role" data-role-card="person"><div class="creative-role-head"><label for="remixPerson">人物</label><span data-role-status>必选</span></div><input id="remixPerson" type="file" accept="image/*,.heic,.heif" data-remix-role="person"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="remixPerson">清除</button></div>
+              <div class="creative-role" data-role-card="product" hidden><div class="creative-role-head"><label for="remixProduct">商品</label><span data-role-status>必选</span></div><input id="remixProduct" type="file" accept="image/*,.heic,.heif" data-remix-role="product"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="remixProduct">清除</button></div>
+              <div class="creative-role" data-role-card="scene" hidden><div class="creative-role-head"><label for="remixScene">场景</label><span data-role-status>必选</span></div><input id="remixScene" type="file" accept="image/*,.heic,.heif" data-remix-role="scene"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="remixScene">清除</button></div>
+            </div>
+            <div class="creative-options"><div class="field"><label for="remixQuality">清晰度</label><select id="remixQuality" disabled><option value="720p">720P · 1.5 pt</option></select></div></div>
+            <small class="muted">默认保留并对齐原片完整音轨；换人后口型可能无法与原声精确同步。请使用有权使用的素材。</small>
+            <p id="remixError" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始复刻</button>
+          </div>
+        </form>
+        <section class="panel creative-results"><div class="panel-head"><h2>复刻记录</h2><button class="btn small" type="button" data-creative-refresh="remix">刷新</button></div><div id="remixTasks" aria-live="polite"><div class="empty">上传参考视频，开始你的第一次复刻。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-editor" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">Video editor · Project</div><h1>视频编辑项目</h1><p class="muted">上传原视频，用一句 Prompt 说清要改什么（换人、换商品、换场景、改台词）；参考图可选。系统会拆解原片、按要求重新生成并自动质检，其余部分保持原样。</p></div></div>
+        <div class="creative-shell">
+        <form id="editorForm" class="panel creative-form">
+          <div class="creative-source"><label for="editorVideo">参考视频 <span class="muted">必选 · 至少 5 秒</span></label><input id="editorVideo" type="file" accept="video/*,.mp4,.mov,.m4v,.webm,.3gp,.mkv,.avi" required><p id="editorVideoInfo" class="muted">按时长计费：每 15 秒 4 pt，不足 15 秒按一档计。</p><div id="editorVideoPreview" class="creative-source-preview"><p class="muted">选择视频后可在这里预览。</p></div></div>
+          <div class="creative-controls"><h2>参考图片（可选）</h2><p class="muted">想换成指定的人物、商品或场景就上传图片（最多 3 张，按顺序是图 1、图 2、图 3）；不上传时系统按你的 Prompt 自动设计。</p>
+            <input id="editorImages" type="file" accept="image/*,.heic,.heif" multiple>
+            <div id="editorReferences" class="creative-image-previews"><p class="muted">选择图片后会按顺序显示编号。</p></div>
+            <div class="field"><label for="editorPrompt">编辑 Prompt</label><textarea id="editorPrompt" rows="6" maxlength="8000" required placeholder="例如：给我换一个人物以及场景，其余保持一样&#10;或：把视频里的 grok 换成 equai，人物换成新造型，其余剧情不变&#10;或：把人物换成图1，场景换成海边"></textarea></div>
+            <p id="editorError" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始编辑</button>
+          </div>
+        </form>
+        <section class="panel creative-results" hidden><div class="panel-head"><h2>我的模板</h2><button class="btn small" type="button" id="templatesRefresh">刷新</button></div><p class="muted">把满意的重演结果保存为模板：之后只写新的提示词（每行一条，多行即批量），复用原片分析、脚本、包装和没变的素材。模板保留 3 天。</p><div id="editorTemplates"><div class="empty">还没有模板。在下方已完成的重演记录上点「保存为模板」。</div></div></section>
+        <section class="panel creative-results"><div class="panel-head"><h2>编辑记录</h2><button class="btn small" type="button" data-creative-refresh="editor">刷新</button></div><div id="editorTasks"><div class="empty">上传视频和参考图，开始编辑。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-image-edit" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">Image editing</div><h1>图片编辑</h1><p class="muted">上传图片，说清要改哪里；其他部分尽量保留。</p></div></div>
+        <div class="creative-shell">
+        <form id="imageEditForm" class="panel creative-form">
+          <div class="creative-source"><label for="editImages">参考图片 <span class="muted">可选 · 最多 4 张</span></label><input id="editImages" type="file" accept="image/*,.heic,.heif" multiple><small class="muted">可不上传图片，直接根据文字生成；上传多张时按顺序编号为图一、图二、图三、图四，每张 30 MB 以内。</small><div id="editSourcePreview" class="creative-image-previews"><p class="muted">未上传图片时，将按 Prompt 生成新图。</p></div></div>
+          <div class="creative-controls"><h2>描述你想要的修改</h2><div class="field"><label for="editPrompt">编辑要求</label><textarea id="editPrompt" rows="6" maxlength="8000" required placeholder="例如：把图一人物的上衣换成图二的款式，其他部分尽量保持不变。"></textarea></div><p class="muted">图片编辑可能重绘细节。文字、商标和精密商品结构请下载后核对。</p><p id="editPrice" class="muted">正在读取服务状态…</p><p id="imageEditError" class="form-error" role="alert"></p><button class="btn primary" type="submit" disabled>开始编辑</button></div>
+        </form>
+        <section class="panel creative-results"><div class="panel-head"><h2>编辑记录</h2><button class="btn small" type="button" data-creative-refresh="image-edit">刷新</button></div><div id="imageEditTasks" aria-live="polite"><div class="empty">上传原图，开始你的第一次图片编辑。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-music" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">Audio · Edit</div><h1>音乐编辑</h1><p class="muted">上传 MP3、WAV、M4A 或 FLAC，调整风格、人声和歌词，生成新的演唱版本。</p></div></div>
+        <div class="creative-shell">
+        <form id="musicForm" class="panel creative-form">
+          <div class="creative-source"><label for="musicSource">源文件</label><input id="musicSource" type="file" accept=".mp3,.wav,.mp4,.m4a,.flac,audio/*,video/mp4" required><small class="muted">没有歌词时会自动识别并直接开始生成。</small></div>
+          <div class="creative-controls">
+            <div class="field"><label for="musicStyle">音乐风格</label><select id="musicStyle"><option>摇滚</option><option>R&B</option><option>爵士</option><option>民谣摇滚</option><option>Synth-pop</option><option>暗黑电影感</option><option>纯器乐</option></select></div>
+            <div class="field"><label for="musicVoice">人声</label><select id="musicVoice"><option>不指定</option><option>男声</option><option>女声</option><option>无人声</option></select></div>
+            <div class="field"><label for="musicPrompt">自定义要求（可选）</label><textarea id="musicPrompt" rows="4" maxlength="2000" placeholder="例如：保留主旋律，加入温暖的吉他和现场鼓组"></textarea></div>
+            <div class="field"><label for="musicLyrics">歌词（可选）</label><textarea id="musicLyrics" rows="5" maxlength="20000" placeholder="留空时自动识别"></textarea></div>
+            <p id="musicPrice" class="muted">每首歌 0.5 pt，成功后扣除。</p><p id="musicError" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始编辑</button>
+          </div>
+        </form>
+        <section class="panel creative-results"><div class="panel-head"><h2>编辑任务</h2><button class="btn small" type="button" id="musicRefresh">刷新</button></div><div id="musicTasks"><div class="empty">上传音频后，编辑任务会显示在这里。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-api" class="page hidden">
+        <div class="page-head api-page-head"><div><div class="eyebrow">Developer workspace</div><h1>API 接入</h1><p>管理调用密钥，查看接口参数、示例和返回格式。</p></div></div>
+        <div class="api-tabs" role="tablist" aria-label="API 接入内容">
+          <button id="apiTabKeys" class="active" type="button" role="tab" aria-selected="true" aria-controls="apiSectionKeys" data-api-tab="keys">API Keys</button>
+          <button id="apiTabDocs" type="button" role="tab" aria-selected="false" aria-controls="apiSectionDocs" data-api-tab="docs">接口文档</button>
+        </div>
+        <section id="apiSectionKeys" class="api-section" role="tabpanel" aria-labelledby="apiTabKeys">
+          <div class="page-head api-section-head"><div><h2>API Keys</h2><p>创建服务端调用凭证，并随时撤销不再使用的 Key。</p></div><button id="createKeyBtn" class="btn primary">创建 API Key</button></div>
+          <div class="notice">API Key 只应保存在你的服务端环境变量中，不要放进网页、客户端 App 或公开仓库。</div>
+          <section class="panel"><div id="keyList"></div></section>
+        </section>
+        <section id="apiSectionDocs" class="api-section hidden" role="tabpanel" aria-labelledby="apiTabDocs">
+          <div class="page-head api-section-head"><div><h2>接口文档</h2><p>API 基址、认证方式、请求示例和状态查询说明。</p></div></div>
+          <div id="embeddedDocs" class="embedded-reference" aria-live="polite">
+            <div class="docs-loading">正在载入商户 API 文档…</div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <div id="communityModal" class="modal community-modal hidden" role="dialog" aria-modal="true" aria-labelledby="communityTitle">
+    <div class="modal-card community-card">
+      <button id="closeCommunity" class="modal-close" type="button" aria-label="关闭">×</button>
+      <div class="eyebrow">Equai community</div><h2 id="communityTitle">扫码加入商户群</h2>
+      <p class="muted">API 接入、任务异常和商务开通，都可以在群里沟通。</p>
+      <a href="/merchant-support-group-20260927.png" target="_blank" rel="noopener"><img src="/merchant-support-group-20260927.png" alt="Equai 群聊二维码"></a>
+      <small>二维码失效时刷新页面即可查看更新版本</small>
+    </div>
+  </div>
+  <div id="secretModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="secretTitle">
+    <div class="modal-card"><div class="eyebrow">Shown once</div><h2 id="secretTitle">请保存密钥</h2><p id="secretNotice" class="muted"></p><div id="secretValue" class="secret"></div><div class="top-actions" style="margin-top:18px"><button id="copySecret" class="btn primary">复制</button><button id="closeSecret" class="btn">我已保存</button></div></div>
+  </div>
+  <div id="taskDetailModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="taskDetailTitle">
+    <div class="modal-card task-detail-modal-card">
+      <button id="closeTaskDetail" class="modal-close" type="button" aria-label="关闭">×</button>
+      <div class="eyebrow">Call detail</div>
+      <h2 id="taskDetailTitle">调用详情</h2>
+      <p id="taskDetailMeta" class="muted"></p>
+      <div class="prompt-detail-grid">
+        <section class="prompt-detail-panel">
+          <header><strong>原始提示词</strong><button class="btn small copy-task-prompt" type="button" data-prompt-kind="original">复制</button></header>
+          <pre id="taskOriginalPrompt"></pre>
+        </section>
+        <section class="prompt-detail-panel">
+          <header><strong>处理后的提示词</strong><button class="btn small copy-task-prompt" type="button" data-prompt-kind="processed">复制</button></header>
+          <pre id="taskProcessedPrompt"></pre>
+        </section>
+      </div>
+      <div class="top-actions task-detail-actions">
+        <a id="taskDetailDownload" class="btn primary" href="#" target="_blank" rel="noopener">下载视频</a>
+        <button id="taskDetailDone" class="btn" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js?v=r117-digital-human" defer></script>
+  <script src="/creative.js?v=r119-digital-human-prompt-compiler" defer></script>
+</body>
+</html>

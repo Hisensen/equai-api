@@ -1,0 +1,109 @@
+services:
+  api:
+    build: .
+    image: equai-api:r96-digital-human-runtime
+    container_name: equai-api
+    restart: unless-stopped
+    env_file:
+      - path: /opt/equai/api.env
+        format: raw
+    environment:
+      # Owner-confirmed image edit price: 0.2 pt per successful image.
+      H3_IMAGE_EDIT_PRICE_MILLI: "200"
+      # Video remix adds 0.5 pt to the selected standard video tier.
+      H3_REMIX_SURCHARGE_MILLI: "500"
+      # New jobs upload directly to private object storage. Existing local
+      # artifacts remain readable through their stored per-task metadata.
+      H3_WORKER_TRANSFER_BACKEND: cos
+      H3_LOCAL_OUTPUTS: "0"
+      H3_LOCAL_INPUT_DIR: /data/inputs
+      H3_LOCAL_RESULT_DIR: /data/job-results
+      # Direct origin used only inside signed GPU job parameters; never returned to merchants.
+      H3_TRANSFER_BASE_URL: https://transfer.172-98-23-30.sslip.io:8443
+      H3_TRANSFER_HOSTNAME: transfer.172-98-23-30.sslip.io
+      H3_TRANSFER_HOST_IP: 172.98.23.30
+      H3_TRANSFER_MAX_GRANT_SECONDS: "93600"
+      # Browser media goes to the authenticated Guangzhou relay, then into COS.
+      H3_DIRECT_UPLOADS: "1"
+      H3_UPLOAD_RELAY_BASE_URL: https://129.204.50.9
+      COS_CDN_DOMAIN: ${COS_CDN_DOMAIN:-}
+      # All production video modes temporarily use the Zhejiang Four 4090-48G
+      # pool; the 24G Fujian Four pool is disabled until further notice.
+      # Experimental RTX 5090 workers are submitted only by isolated test scripts.
+      GONGJI_720_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-720-ref1-6step-io
+      GONGJI_720_STORAGE_ID: "2593"
+      GONGJI_720_REGION_NAME: 浙江四区
+      GONGJI_720_GPU_NAME: 4090-48G
+      GONGJI_720_GPU_COUNT: "1"
+      GONGJI_720_COMFY_ARGS: "--use-ck-attention --reserve-vram 1 --fast-disk"
+      GONGJI_720_SOLATTN: tau:1.3:0.0:1.0
+      # Keep workload-specific overrides explicit; both standard and
+      # video-conditioned reference work currently resolve to Zhejiang 48G.
+      GONGJI_REMIX_720_REGION_NAME: 浙江四区
+      GONGJI_REMIX_720_STORAGE_ID: "2593"
+      GONGJI_REMIX_720_GPU_NAME: 4090-48G
+      GONGJI_REMIX_720_GPU_COUNT: "1"
+      # Video-conditioned reference generation at every public tier uses the
+      # same Zhejiang 48G resource; the worker image remains tier-specific.
+      GONGJI_REMIX_1080_REGION_NAME: 浙江四区
+      GONGJI_REMIX_1080_STORAGE_ID: "2593"
+      GONGJI_REMIX_1080_GPU_NAME: 4090-48G
+      GONGJI_REMIX_1080_GPU_COUNT: "1"
+      GONGJI_REMIX_2K_REGION_NAME: 浙江四区
+      GONGJI_REMIX_2K_STORAGE_ID: "2593"
+      GONGJI_REMIX_2K_GPU_NAME: 4090-48G
+      GONGJI_REMIX_2K_GPU_COUNT: "1"
+      H3_REMIX_MAX_CONCURRENCY: "4"
+      H3_REMIX_DISPATCH_PARALLELISM: "2"
+      # Portal remix: hypit edit path, reference read by qwen3-vl-plus (remix_vision). legacy = old Qwen+keyframes.
+      H3_REMIX_ANALYSIS_ENGINE: hypit-api
+      # Hypit audio understanding: async sentence-level multilingual transcription.
+      H3_ASR_ENABLED: "1"
+      H3_ASR_MODEL: qwen3-asr-flash-filetrans
+      H3_ASR_BASE_URL: https://dashscope.aliyuncs.com
+      H3_ASR_POLL_INTERVAL_SEC: "2"
+      H3_ASR_POLL_TIMEOUT_SEC: "180"
+      # Reference video -> Qwen motion script. The following H3 job receives images only.
+      GONGJI_QWEN_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:qwen3vl-4b-int8-remix-r5
+      # Isolated latent-linked worker for API-only videos longer than 15 seconds.
+      GONGJI_LONG_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r38-4090-720-ref1-5step-io
+      GONGJI_LONG_OVERLAY_KEY: runtime/long-video/r48-digital-human-original-audio/h3-long-worker.tar.gz
+      GONGJI_LONG_TIMEOUT_SEC: "7200"
+      GONGJI_LONG_ESTIMATED_SEC: "1800"
+      H3_LONG_MAX_DURATION_SECONDS: "60"
+      H3_LONG_PRICE_PER_SEGMENT_MILLI: "1000"
+      GONGJI_1080_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-1080-ref1-6step-io
+      GONGJI_1080_STORAGE_ID: "2593"
+      GONGJI_1080_REGION_NAME: 浙江四区
+      GONGJI_1080_GPU_NAME: 4090-48G
+      GONGJI_1080_GPU_COUNT: "1"
+      GONGJI_1080_COMFY_ARGS: "--use-ck-attention --reserve-vram 1 --fast-disk"
+      GONGJI_1080_SOLATTN: tau:1.3:0.0:1.0
+      GONGJI_1080_ESTIMATED_SEC: "720"
+      GONGJI_1080_TIMEOUT_SEC: "2400"
+      GONGJI_2K_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-2k-ref1-6step-denoise02-io
+      GONGJI_2K_STORAGE_ID: "2593"
+      GONGJI_2K_REGION_NAME: 浙江四区
+      GONGJI_2K_GPU_NAME: 4090-48G
+      GONGJI_2K_GPU_COUNT: "1"
+      GONGJI_2K_COMFY_ARGS: "--use-ck-attention --reserve-vram 1 --fast-disk"
+      GONGJI_2K_SOLATTN: tau:1.3:0.0:1.0
+      GONGJI_2K_ESTIMATED_SEC: "960"
+      GONGJI_2K_TIMEOUT_SEC: "3600"
+      H3_PRICE_720P_MILLI: "1000"
+      H3_PRICE_1080P_MILLI: "2000"
+      H3_PRICE_2K_MILLI: "3000"
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - /data/equai:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

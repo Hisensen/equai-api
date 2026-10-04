@@ -1,0 +1,28 @@
+# Runtime wiring for the single GPU music worker.
+# This file does not start prewarming. Set MUSIC_WORKER_IMAGE to the published
+# worker image when the image is available, then run the prewarm command
+# separately on the worker host.
+services:
+  music-worker:
+    image: ${MUSIC_WORKER_IMAGE:?set MUSIC_WORKER_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - ./worker-runtime.env
+    environment:
+      MUSIC_MODEL_RELEASE: ${MUSIC_MODEL_RELEASE:-2026-09-29-yue2-sheetsage2}
+      MUSIC_MODEL_MANIFEST_KEY: ${MUSIC_MODEL_MANIFEST_KEY:-models/h3-standard/music/2026-09-29-yue2-sheetsage2/manifest.json}
+      MUSIC_MODEL_CURRENT_KEY: ${MUSIC_MODEL_CURRENT_KEY:-models/h3-standard/music/current.json}
+      MUSIC_MODEL_CACHE_DIR: ${MUSIC_MODEL_CACHE_DIR:-/var/lib/equai/music-models}
+      MUSIC_JOB_DIR: ${MUSIC_JOB_DIR:-/var/lib/equai/music-jobs}
+      MUSIC_QUEUE_CONCURRENCY: ${MUSIC_QUEUE_CONCURRENCY:-1}
+      MUSIC_PREWARM: ${MUSIC_PREWARM:-0}
+    volumes:
+      - ${MUSIC_MODEL_CACHE_HOST_DIR:-/var/lib/equai/music-models}:/var/lib/equai/music-models
+      - ${MUSIC_JOB_HOST_DIR:-/var/lib/equai/music-jobs}:/var/lib/equai/music-jobs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,8 @@
+cos_python_sdk_v5==1.9.44
+fastapi==0.141.1
+httpx==0.28.1
+pycryptodome==3.23.0
+python-multipart==0.0.32
+uvicorn==0.52.3
+Pillow>=11.3,<13
+pillow-heif>=1.1,<2

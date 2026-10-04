@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 48" role="img" aria-labelledby="title">
+  <title id="title">Equai bridge</title>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#6fe5ff"/>
+      <stop offset=".52" stop-color="#7fa8ff"/>
+      <stop offset="1" stop-color="#a88bff"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-80%" width="200%" height="260%">
+      <feGaussianBlur stdDeviation="2.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <circle cx="10" cy="31" r="4" fill="#dff8ff" filter="url(#glow)"/>
+  <path d="M4 43c0-6 3-9 6-9s6 3 6 9" fill="url(#g)" opacity=".9"/>
+  <g fill="none" stroke="url(#g)" stroke-linecap="round" filter="url(#glow)">
+    <path d="M18 36h72" stroke-width="2"/>
+    <path d="M28 36V13M64 36V13" stroke-width="2.2"/>
+    <path d="M18 35c7 0 9-1 10-22 1 12 9 19 18 20 9-1 17-8 18-20 1 21 4 22 26 22" stroke-width="1.6"/>
+    <path d="M31 21v15M36 27v9M42 31v5M50 31v5M57 26v10M69 21v15M75 28v8M82 33v3" stroke-width=".7" opacity=".75"/>
+  </g>
+</svg>

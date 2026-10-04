@@ -1,0 +1,48 @@
+services:
+  api:
+    build: .
+    image: equai-api:r43-pt
+    container_name: equai-api
+    restart: unless-stopped
+    env_file:
+      - path: /opt/equai/api.env
+        format: raw
+    environment:
+      H3_WORKER_TRANSFER_BACKEND: local
+      H3_LOCAL_INPUT_DIR: /data/inputs
+      H3_LOCAL_RESULT_DIR: /data/job-results
+      # Direct origin used only inside signed GPU job parameters; never returned to merchants.
+      H3_TRANSFER_BASE_URL: https://transfer.172-98-23-30.sslip.io:8443
+      H3_TRANSFER_HOSTNAME: transfer.172-98-23-30.sslip.io
+      H3_TRANSFER_HOST_IP: 172.98.23.30
+      H3_TRANSFER_MAX_GRANT_SECONDS: "93600"
+      GONGJI_720_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r9-tier
+      GONGJI_1080_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-latenthd-r9-tier
+      # 2K 与 1080p 共用 latenthd 镜像；档位由 tier 参数驱动逐级二采。
+      GONGJI_2K_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-latenthd-r9-tier
+      GONGJI_2K_STORAGE_ID: "2593"
+      GONGJI_2K_REGION_NAME: 天津一区
+      GONGJI_2K_GPU_NAME: 5090
+      GONGJI_2K_GPU_COUNT: "1"
+      GONGJI_2K_ESTIMATED_SEC: "960"
+      GONGJI_2K_TIMEOUT_SEC: "3600"
+      H3_PRICE_720P_MILLI: "1000"
+      H3_PRICE_1080P_MILLI: "2000"
+      H3_PRICE_2K_MILLI: "3000"
+      H3_FAILURE_PRICE_720P_MILLI: "100"
+      H3_FAILURE_PRICE_1080P_MILLI: "200"
+      H3_FAILURE_PRICE_2K_MILLI: "300"
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - /data/equai:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

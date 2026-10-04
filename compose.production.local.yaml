@@ -1,0 +1,70 @@
+services:
+  api:
+    extends:
+      file: compose.production.hk.yaml
+      service: api
+    # Production profile for the Tencent Cloud server that owns the media disk.
+    # It intentionally uses the local transfer backend; COS credentials may
+    # remain in api.env during migration, but no new task uses them.
+    build: .
+    image: equai-api:local-storage
+    container_name: equai-api
+    restart: unless-stopped
+    env_file:
+      - /opt/equai/api.env
+    environment:
+      H3_WORKER_TRANSFER_BACKEND: local
+      H3_LOCAL_OUTPUTS: "1"
+      H3_LOCAL_INPUT_DIR: /data/inputs
+      H3_LOCAL_OUTPUT_DIR: /data/videos
+      H3_LOCAL_RESULT_DIR: /data/job-results
+      H3_LOCAL_RUNTIME_DIR: /data/runtime
+      # Copy the long-video and Hypit analyzer bundles here during migration.
+      # When these files exist, workers fetch them from the Guangzhou disk.
+      H3_LOCAL_RUNTIME_OVERLAY_PATH: /data/runtime/h3-long-worker.tar.gz
+      H3_LOCAL_HYPIT_ANALYZER_OVERLAY_PATH: /data/runtime/hypit-remix-analyzer.tgz
+      H3_PUBLIC_BASE_URL: ${H3_PUBLIC_BASE_URL:?set the public HTTPS base URL}
+      H3_TRANSFER_BASE_URL: ${H3_TRANSFER_BASE_URL:?set the public HTTPS transfer URL}
+      H3_TRANSFER_HOSTNAME: ${H3_TRANSFER_HOSTNAME:?set the worker transfer hostname}
+      H3_TRANSFER_HOST_IP: ${H3_TRANSFER_HOST_IP:?set the worker transfer IP}
+      H3_TRANSFER_MAX_GRANT_SECONDS: "93600"
+      H3_DOWNLOAD_SECRET: ${H3_DOWNLOAD_SECRET:?set a 32+ character secret}
+      H3_TRANSFER_SECRET: ${H3_TRANSFER_SECRET:?set a 32+ character secret}
+      # Multipart uploads are written directly to this server's /data disk.
+      # Browser files receive signed local grants; COS is not in the new-upload path.
+      H3_DIRECT_UPLOADS: "1"
+      H3_LOCAL_DIRECT_UPLOADS: "1"
+      H3_UPLOAD_RELAY_BASE_URL: ""
+      H3_UPLOAD_RELAY_FALLBACK_URL: ""
+      COS_DOWNLOAD_RELAY: ""
+      COS_CDN_DOMAIN: ""
+      # Queueing only pauses when this shared disk approaches a 2 GiB reserve.
+      H3_MIN_FREE_TRANSFER_BYTES: "2147483648"
+      H3_MIN_FREE_OUTPUT_BYTES: "2147483648"
+      H3_OUTPUT_RETENTION_SECONDS: "172800"
+      H3_MUSIC_ENABLED: "0"
+      H3_MUSIC_PRICE_MILLI: "1000"
+      H3_MUSIC_INTERNAL_MERCHANT_IDS: ${H3_MUSIC_INTERNAL_MERCHANT_IDS:-}
+      GONGJI_MUSIC_IMAGE: ${GONGJI_MUSIC_IMAGE:-}
+      # Keep the Zhejiang 4090-48G pool selected for all public video tiers.
+      GONGJI_720_REGION_NAME: 浙江四区
+      GONGJI_720_STORAGE_ID: "2593"
+      GONGJI_720_GPU_NAME: 4090-48G
+      GONGJI_720_GPU_COUNT: "1"
+      GONGJI_REMIX_720_REGION_NAME: 浙江四区
+      GONGJI_REMIX_720_STORAGE_ID: "2593"
+      GONGJI_REMIX_720_GPU_NAME: 4090-48G
+      GONGJI_REMIX_720_GPU_COUNT: "1"
+      GONGJI_REMIX_1080_REGION_NAME: 浙江四区
+      GONGJI_REMIX_1080_STORAGE_ID: "2593"
+      GONGJI_REMIX_1080_GPU_NAME: 4090-48G
+      GONGJI_REMIX_1080_GPU_COUNT: "1"
+      GONGJI_REMIX_2K_REGION_NAME: 浙江四区
+      GONGJI_REMIX_2K_STORAGE_ID: "2593"
+      GONGJI_REMIX_2K_GPU_NAME: 4090-48G
+      GONGJI_REMIX_2K_GPU_COUNT: "1"
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - /data/equai:/data

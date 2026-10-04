@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="EQUAI 商家视频生成 API 文档">
+  <title>EQUAI API Reference</title>
+  <link rel="icon" type="image/png" sizes="256x256" href="/equai-favicon-r34.png">
+  <link rel="apple-touch-icon" href="/equai-favicon-r34.png">
+  <link rel="stylesheet" href="/styles.css?v=r43">
+</head>
+<body class="docs-body">
+  <header class="topbar docs-topbar">
+    <a class="brand docs-brand" href="/"><img class="brand-wordmark" src="/equai-mark-white.png" alt="equai"></a>
+    <div class="top-actions"><span class="docs-scope">仅视频生成接口</span><a class="btn ghost small" href="/#docs">返回控制台</a></div>
+  </header>
+
+  <div class="reference-shell">
+    <aside class="reference-nav" aria-label="文档目录">
+      <div class="reference-version"><span>API VERSION</span><strong>v1</strong></div>
+      <nav>
+        <a href="#start">快速开始</a>
+        <a href="#auth">认证与幂等</a>
+        <a href="#fields">公共字段</a>
+        <a href="#text">文生视频</a>
+        <a href="#image">首尾帧</a>
+        <a href="#reference">多参考</a>
+        <a href="#python">Python 示例</a>
+        <a href="#status">查询与取消</a>
+        <a href="#billing">计费与存储</a>
+        <a href="#errors">错误码</a>
+      </nav>
+    </aside>
+
+    <main class="reference-main">
+      <section class="reference-hero" id="start">
+        <div class="eyebrow">EQUAI video generation / merchant contract</div>
+        <h1>三个固定入口，<br>三种输入方式。</h1>
+        <p>清晰度由接口地址固定，商户不提交清晰度参数。文生、首尾帧和多参考都通过 <code>kind</code> 选择输入结构。</p>
+        <div class="endpoint-line"><span>POST</span><code><span class="runtime-origin"></span>/v1/videos/720p</code><button class="copy-inline" data-copy="origin">复制基址</button></div>
+        <div class="endpoint-line"><span>POST</span><code><span class="runtime-origin"></span>/v1/videos/1080p</code></div>
+        <div class="endpoint-line"><span>POST</span><code><span class="runtime-origin"></span>/v1/videos/2k</code></div>
+        <div class="quality-rail" aria-label="清晰度对照">
+          <div><span>720P</span><strong>POST /v1/videos/720p</strong><small>标准清晰度 · 成功 1 pt</small></div>
+          <div><span>1080P</span><strong>POST /v1/videos/1080p</strong><small>高清输出 · 成功 2 pt</small></div>
+          <div><span>2K</span><strong>POST /v1/videos/2k</strong><small>超高清输出 · 成功 3 pt</small></div>
+        </div>
+      </section>
+
+      <section class="reference-section" id="auth">
+        <div class="section-marker">AUTH</div>
+        <div class="section-copy">
+          <h2>认证与防止重复下单</h2>
+          <p>所有视频接口使用商家 API Key。Key 只放在服务端环境变量中，不要写进浏览器、App 或公开仓库。</p>
+          <div class="contract-list">
+            <div><code>Authorization</code><span><strong>必填</strong> · <code>Bearer h3_live_...</code></span></div>
+            <div><code>Idempotency-Key</code><span><strong>强烈建议</strong> · 每个业务订单使用唯一值；网络重试会返回原任务，不会再次冻结积分。</span></div>
+            <div><code>Content-Type</code><span>由 cURL 或 requests 自动生成 <code>multipart/form-data</code> 与 boundary，不要手写。</span></div>
+          </div>
+          <pre class="code-block"><code>Authorization: Bearer $EQUAI_API_KEY
+Idempotency-Key: order-your-system-20260830-001</code></pre>
+        </div>
+      </section>
+
+      <section class="reference-section" id="fields">
+        <div class="section-marker">FIELDS</div>
+        <div class="section-copy">
+          <h2>创建任务字段</h2>
+          <div class="table-wrap api-table"><table>
+            <thead><tr><th>字段</th><th>必填</th><th>允许值</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td><code>kind</code></td><td>是</td><td><code>text</code> / <code>image</code> / <code>reference</code></td><td>决定素材校验方式。</td></tr>
+              <tr><td><code>prompt</code></td><td>是</td><td>1–30000 字符</td><td>视频提示词；多参考可使用 Subject / Picture 结构。</td></tr>
+              <tr><td><code>duration</code></td><td>否</td><td><code>5</code>–<code>15</code> 的整数</td><td>默认 15 秒；可逐秒选择，同一清晰度下价格不随时长变化。</td></tr>
+              <tr><td><code>ratio</code></td><td>否</td><td><code>16:9</code> / <code>9:16</code></td><td>默认横屏 16:9。</td></tr>
+              <tr><td><code>title</code></td><td>否</td><td>最多 100 字符</td><td>显示在商家调用记录中，建议填写业务订单号或用途。</td></tr>
+              <tr><td><code>seed</code></td><td>否</td><td>整数</td><td><code>0</code> 表示自动随机。</td></tr>
+              <tr><td><code>video_audio_flags</code></td><td>否</td><td>例如 <code>1,0</code></td><td>仅用于 <code>reference</code>。按 <code>videos</code> 的上传顺序对应：<code>1</code> 保留该参考视频的声音，<code>0</code> 忽略；不传时默认全部保留。</td></tr>
+            </tbody>
+          </table></div>
+        </div>
+      </section>
+
+      <section class="mode-section" id="text">
+        <div class="mode-heading"><span class="mode-token">kind=text</span><div><h2>文生视频</h2><p>不上传任何素材。720P、1080P 和 2K 使用各自的固定创建地址。</p></div></div>
+        <div class="code-pair">
+          <article class="code-card"><header><div><span class="quality-dot q720"></span>720P · 1 pt</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/v1/videos/720p' \
+  -H 'Authorization: Bearer $EQUAI_API_KEY' \
+  -H 'Idempotency-Key: text-720-order-001' \
+  -F 'kind=text' \
+  -F 'duration=15' \
+  -F 'ratio=16:9' \
+  -F 'title=广告片-001' \
+  -F 'prompt=真人电影风格，清晨的海边，镜头缓慢推进，无字幕'</code></pre></article>
+          <article class="code-card"><header><div><span class="quality-dot q1080"></span>1080P · 2 pt</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/v1/videos/1080p' \
+  -H 'Authorization: Bearer $EQUAI_API_KEY' \
+  -H 'Idempotency-Key: text-1080-order-001' \
+  -F 'kind=text' \
+  -F 'duration=15' \
+  -F 'ratio=16:9' \
+  -F 'title=广告片-HD-001' \
+  -F 'prompt=真人电影风格，清晨的海边，镜头缓慢推进，无字幕'</code></pre></article>
+          <article class="code-card"><header><div><span class="quality-dot q2k"></span>2K · 3 pt</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/v1/videos/2k' \
+  -H 'Authorization: Bearer $EQUAI_API_KEY' \
+  -H 'Idempotency-Key: text-2k-order-001' \
+  -F 'kind=text' \
+  -F 'duration=15' \
+  -F 'ratio=16:9' \
+  -F 'title=广告片-2K-001' \
+  -F 'prompt=真人电影风格，清晨的海边，镜头缓慢推进，无字幕'</code></pre></article>
+        </div>
+      </section>
+
+      <section class="mode-section" id="image">
+        <div class="mode-heading"><span class="mode-token">kind=image</span><div><h2>首尾帧视频</h2><p><code>first_frame</code> 必传，<code>last_frame</code> 可选；只传首帧就是图生视频。</p></div></div>
+        <div class="mode-note"><strong>素材规则</strong><span>图片使用 PNG / JPEG 等标准格式；服务端会同时检查声明类型和文件内容。整次请求全部素材合计最大 512MB。不要使用 <code>uploads</code>，首尾帧直接使用命名字段。</span></div>
+        <div class="code-pair">
+          <article class="code-card"><header><div><span class="quality-dot q720"></span>720P · 首帧</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/v1/videos/720p' \
+  -H 'Authorization: Bearer $EQUAI_API_KEY' \
+  -H 'Idempotency-Key: image-720-order-001' \
+  -F 'kind=image' \
+  -F 'duration=10' \
+  -F 'ratio=9:16' \
+  -F 'prompt=女孩自然抬头看向镜头，微风吹动头发，真实光影' \
+  -F 'first_frame=@./first.png;type=image/png'</code></pre></article>
+          <article class="code-card"><header><div><span class="quality-dot q1080"></span>1080P · 首尾帧</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/v1/videos/1080p' \
+  -H 'Authorization: Bearer $EQUAI_API_KEY' \
+  -H 'Idempotency-Key: image-1080-order-001' \
+  -F 'kind=image' \
+  -F 'duration=10' \
+  -F 'ratio=9:16' \
+  -F 'prompt=女孩从首帧姿态自然运动到尾帧姿态，动作连续' \
+  -F 'first_frame=@./first.png;type=image/png' \
+  -F 'last_frame=@./last.png;type=image/png'</code></pre></article>
+        </div>
+      </section>
+
+      <section class="mode-section" id="reference">
+        <div class="mode-heading"><span class="mode-token">kind=reference</span><div><h2>多参考视频</h2><p>直接使用可重复的 <code>images</code>、<code>videos</code> 和 <code>audios</code> 文件字段，不需要额外的类型数组。</p></div></div>
+        <div class="reference-mapping" aria-label="多参考字段映射示例">
+          <div><span>images=@person.png</span><b>→</b><span>&lt;Picture 1&gt;</span></div>
+          <div><span>videos=@motion.mp4</span><b>→</b><span>&lt;Video 1&gt;</span></div>
+          <div><span>audios=@voice.wav</span><b>→</b><span>&lt;Audio 1&gt;</span></div>
+        </div>
+        <div class="mode-note"><strong>编号与限制</strong><span>图片、视频、音频分别按各自的上传顺序编号。例如第 2 张图片是 <code>&lt;Picture 2&gt;</code>，第 1 个视频仍是 <code>&lt;Video 1&gt;</code>。图片最多 9 张、视频最多 3 个、音频最多 3 个，全部合计最多 12 个且不超过 512MB。</span></div>
+        <div class="mode-note warning"><strong>Subject 不是文件字段</strong><span><code>&lt;Subject 1&gt;</code> 是你在提示词中自行定义的语义名称，服务端不会自动创建 Subject。需要明确写成“<code>&lt;Subject 1&gt; 是 &lt;Picture 1&gt; 中的女子</code>”。文件名只用于上传，不参与提示词匹配。</span></div>
+        <div class="code-pair">
+          <article class="code-card"><header><div><span class="quality-dot q720"></span>720P · 多图片参考</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/v1/videos/720p' \
+  -H 'Authorization: Bearer $EQUAI_API_KEY' \
+  -H 'Idempotency-Key: ref-720-order-001' \
+  -F 'kind=reference' \
+  -F 'duration=15' \
+  -F 'ratio=16:9' \
+  -F 'prompt=&lt;Subject 1&gt; 是 &lt;Picture 1&gt; 中的女子……' \
+  -F 'images=@./woman.png;type=image/png' \
+  -F 'images=@./mother.png;type=image/png' \
+  -F 'images=@./father.png;type=image/png'</code></pre></article>
+          <article class="code-card"><header><div><span class="quality-dot q1080"></span>1080P · 图片/视频/音频参考</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/v1/videos/1080p' \
+  -H 'Authorization: Bearer $EQUAI_API_KEY' \
+  -H 'Idempotency-Key: ref-1080-order-001' \
+  -F 'kind=reference' \
+  -F 'duration=15' \
+  -F 'ratio=16:9' \
+  -F 'prompt=&lt;Subject 1&gt; 保持人物一致，参考视频中的运镜……' \
+  -F 'video_audio_flags=1' \
+  -F 'images=@./subject.png;type=image/png' \
+  -F 'videos=@./camera.mp4;type=video/mp4' \
+  -F 'audios=@./voice.wav;type=audio/wav'</code></pre></article>
+        </div>
+        <h3>Python 完整格式：3 张图片＋2 个视频＋1 个音频</h3>
+        <div class="mode-note"><strong>最关键的 Python 规则</strong><span><code>files</code> 必须是列表，每个元素都是 <code>(字段名, (文件名, 文件对象, MIME))</code>。同一个字段可以重复；不要写成字典，否则多张 <code>images</code> 会互相覆盖。</span></div>
+        <article class="code-card full-code"><header><div>requests · 可直接复制运行的多参考示例</div><button class="copy-code">复制</button></header><pre class="code-block"><code>import os
+import uuid
+import requests
+
+BASE_URL = "<span class="runtime-origin"></span>"
+API_KEY = os.environ["EQUAI_API_KEY"]
+
+prompt = """subject_definitions:
+&lt;Subject 1&gt; 是 &lt;Picture 1&gt; 中的年轻女子，保持面部和服装一致。
+&lt;Subject 2&gt; 是 &lt;Picture 2&gt; 中的母亲，保持面部和服装一致。
+&lt;Subject 3&gt; 是 &lt;Picture 3&gt; 中的父亲，保持面部和服装一致。
+
+detailed_description:
+&lt;Subject 1&gt; 在院子中奔跑，动作参考 &lt;Video 1&gt;，
+镜头运动参考 &lt;Video 2&gt;，环境中播放 &lt;Audio 1&gt; 的声音。"""
+
+with (
+    open("woman.png", "rb") as picture_1,
+    open("mother.png", "rb") as picture_2,
+    open("father.jpg", "rb") as picture_3,
+    open("action.mp4", "rb") as video_1,
+    open("camera.mp4", "rb") as video_2,
+    open("ambient.wav", "rb") as audio_1,
+):
+    # 顺序决定编号：三个 images 分别是 Picture 1/2/3；
+    # 两个 videos 分别是 Video 1/2；audios 从 Audio 1 重新编号。
+    files = [
+        ("images", ("woman.png", picture_1, "image/png")),
+        ("images", ("mother.png", picture_2, "image/png")),
+        ("images", ("father.jpg", picture_3, "image/jpeg")),
+        ("videos", ("action.mp4", video_1, "video/mp4")),
+        ("videos", ("camera.mp4", video_2, "video/mp4")),
+        ("audios", ("ambient.wav", audio_1, "audio/wav")),
+    ]
+    data = {
+        "kind": "reference",
+        "prompt": prompt,
+        "duration": 15,
+        "ratio": "16:9",
+        "title": "merchant-order-20260830-001",
+        "seed": 0,
+        # 对应 Video 1、Video 2：保留第一个视频声音，忽略第二个。
+        # 如果两个视频声音都要保留，可以不传此字段。
+        "video_audio_flags": "1,0",
+    }
+    response = requests.post(
+        f"{BASE_URL}/v1/videos/1080p",  # 改成 /720p 即创建 720P
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Idempotency-Key": str(uuid.uuid4()),
+        },
+        data=data,
+        files=files,
+        timeout=600,
+    )
+
+response.raise_for_status()
+task = response.json()
+print(task["id"], task["status"])</code></pre></article>
+        <div class="table-wrap api-table"><table>
+          <thead><tr><th>Python 中的上传项</th><th>提示词中的名称</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td>第 1 个 <code>images</code></td><td><code>&lt;Picture 1&gt;</code></td><td><code>woman.png</code></td></tr>
+            <tr><td>第 2 个 <code>images</code></td><td><code>&lt;Picture 2&gt;</code></td><td><code>mother.png</code></td></tr>
+            <tr><td>第 3 个 <code>images</code></td><td><code>&lt;Picture 3&gt;</code></td><td><code>father.jpg</code></td></tr>
+            <tr><td>第 1 个 <code>videos</code></td><td><code>&lt;Video 1&gt;</code></td><td><code>video_audio_flags</code> 中第 1 位与它对应</td></tr>
+            <tr><td>第 2 个 <code>videos</code></td><td><code>&lt;Video 2&gt;</code></td><td><code>video_audio_flags</code> 中第 2 位与它对应</td></tr>
+            <tr><td>第 1 个 <code>audios</code></td><td><code>&lt;Audio 1&gt;</code></td><td>音频单独从 1 开始编号</td></tr>
+          </tbody>
+        </table></div>
+        <div class="mode-note warning"><strong>常见错误</strong><span>不要把字段写成 <code>picture_1</code>、<code>video_1</code> 或 <code>uploads</code>；不要把多个文件放进 Python 字典；有 2 个视频时，<code>video_audio_flags</code> 若传入就必须正好有 2 位。参数或素材校验失败返回 <code>422</code>，不会扣积分。</span></div>
+        <div class="mode-note"><strong>高清交付</strong><span>文生、首尾帧和多参考均支持 720P、1080P 和 2K；只需更换创建接口地址，表单字段保持一致。</span></div>
+      </section>
+
+      <section class="reference-section" id="python">
+        <div class="section-marker">PY</div>
+        <div class="section-copy">
+          <h2>Python 调用</h2>
+          <p>三个创建函数分别对应 720P、1080P 和 2K，不需要额外传清晰度参数。</p>
+          <article class="code-card full-code"><header><div>requests · 三种模式</div><button class="copy-code">复制</button></header><pre class="code-block"><code>import os
+import uuid
+import requests
+
+BASE_URL = "<span class="runtime-origin"></span>"
+API_KEY = os.environ["EQUAI_API_KEY"]
+
+def _create_video(path, kind, prompt, files=None, extra_fields=None, **options):
+    data = [
+        ("kind", kind),
+        ("prompt", prompt),
+        ("duration", options.get("duration", 15)),
+        ("ratio", options.get("ratio", "16:9")),
+        ("title", options.get("title", "merchant order")),
+        *(extra_fields or []),
+    ]
+    response = requests.post(
+        f"{BASE_URL}{path}",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Idempotency-Key": options.get("order_id", str(uuid.uuid4())),
+        },
+        data=data,
+        files=files or [],
+        timeout=600,
+    )
+    response.raise_for_status()
+    return response.json()
+
+def create_720p(kind, prompt, **options):
+    return _create_video("/v1/videos/720p", kind, prompt, **options)
+
+def create_1080p(kind, prompt, **options):
+    return _create_video("/v1/videos/1080p", kind, prompt, **options)
+
+def create_2k(kind, prompt, **options):
+    return _create_video("/v1/videos/2k", kind, prompt, **options)
+
+# 1. 文生 720P
+text_task = create_720p("text", "电影感城市夜景")
+
+# 2. 首尾帧 1080P
+with open("first.png", "rb") as first, open("last.png", "rb") as last:
+    image_task = create_1080p("image", "人物自然完成动作", files=[
+        ("first_frame", ("first.png", first, "image/png")),
+        ("last_frame", ("last.png", last, "image/png")),
+    ])
+
+# 3. 多参考 1080P：同一素材类型的文件字段可以重复
+with open("person.png", "rb") as person, open("motion.mp4", "rb") as motion:
+    reference_task = create_1080p("reference", "保持人物一致并参考视频运镜", files=[
+        ("images", ("person.png", person, "image/png")),
+        ("videos", ("motion.mp4", motion, "video/mp4")),
+    ])
+
+# 4. 文生 2K
+ultra_task = create_2k("text", "电影感山谷航拍，云层缓慢移动", duration=15)
+
+print(ultra_task["id"], ultra_task["status"])</code></pre></article>
+          <div class="mode-note warning"><strong>Python 首尾帧注意</strong><span>推荐直接使用下方简化写法，因为命名文件字段更清楚。</span></div>
+          <article class="code-card full-code"><header><div>requests · 首尾帧推荐写法</div><button class="copy-code">复制</button></header><pre class="code-block"><code>with open("first.png", "rb") as first, open("last.png", "rb") as last:
+    response = requests.post(
+        f"{BASE_URL}/v1/videos/1080p",
+        headers={"Authorization": f"Bearer {API_KEY}", "Idempotency-Key": "order-001"},
+        data={"kind": "image", "duration": 10,
+              "ratio": "9:16", "prompt": "人物从首帧自然运动到尾帧"},
+        files={"first_frame": ("first.png", first, "image/png"),
+               "last_frame": ("last.png", last, "image/png")},
+        timeout=600,
+    )
+response.raise_for_status()</code></pre></article>
+        </div>
+      </section>
+
+      <section class="reference-section" id="status">
+        <div class="section-marker">TASK</div>
+        <div class="section-copy">
+          <h2>查询、列表与取消</h2>
+          <div class="endpoint-stack">
+            <div><span class="method get">GET</span><code>/v1/videos/{task_id}</code><p>查询单个任务；完成后获得新的 1 小时签名下载地址。</p></div>
+            <div><span class="method get">GET</span><code>/v1/videos?status=completed&amp;limit=100</code><p>列出当前商家的任务，无法读取其他商家的数据。</p></div>
+            <div><span class="method post">POST</span><code>/v1/videos/{task_id}/cancel</code><p>取消任务。开始运行前不收费；开始运行后取消按成功价收费。</p></div>
+          </div>
+          <h3>创建任务返回</h3>
+          <pre class="code-block"><code>{
+  "id": "vid_abc123",
+  "kind": "reference",
+  "quality": "1080p",
+  "duration": 15,
+  "ratio": "16:9",
+  "status": "queued",
+  "progress": 5,
+  "billing_status": "reserved",
+  "price": 2.0,
+  "charged": 0.0
+}</code></pre>
+          <h3>完成后返回</h3>
+          <pre class="code-block"><code>{
+  "id": "vid_abc123",
+  "status": "completed",
+  "progress": 100,
+  "charged": 2.0,
+  "queue_seconds": 51.2,
+  "run_seconds": 228.1,
+  "output_expires_at": 1788330309.85,
+  "output_expired": false,
+  "artifacts": [{
+    "name": "video.mp4",
+    "media": "video",
+    "size_bytes": 1449919,
+    "download_url": "https://...signed...",
+    "download_url_expires_in": 3600
+  }]
+}</code></pre>
+          <h3>轮询示例</h3>
+          <article class="code-card full-code"><header><div>Python · 断线自动恢复，每 15 秒查询</div><button class="copy-code">复制</button></header><pre class="code-block"><code>import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+session = requests.Session()
+session.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=8, connect=8, read=8, status=8, backoff_factor=1,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset({"GET"}),
+)))
+
+task_id = reference_task["id"]
+while True:
+    try:
+        response = session.get(
+            f"{BASE_URL}/v1/videos/{task_id}",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+    except requests.RequestException as exc:
+        print(f"查询暂时断线，原任务仍在运行：{exc}")
+        time.sleep(15)
+        continue
+    if result["status"] == "completed":
+        video_url = result["artifacts"][0]["download_url"]
+        print("download:", video_url)
+        break
+    if result["status"] in {"failed", "cancelled"}:
+        raise RuntimeError(result.get("error") or result.get("message"))
+    time.sleep(15)</code></pre></article>
+        </div>
+      </section>
+
+      <section class="reference-section" id="billing">
+        <div class="section-marker">BILL</div>
+        <div class="section-copy">
+          <h2>计费、余额与文件保存</h2>
+          <div class="billing-grid">
+            <article><span>720P</span><strong>1 pt</strong><p>失败全额退回</p></article>
+            <article><span>1080P</span><strong>2 pt</strong><p>失败全额退回</p></article>
+            <article><span>2K</span><strong>3 pt</strong><p>失败全额退回</p></article>
+            <article><span>视频</span><strong>72 h</strong><p>签名地址每次有效 1 小时</p></article>
+          </div>
+          <ul class="rule-list">
+            <li>创建任务时先冻结成功价；完成后转为实际扣款。</li>
+            <li>参数错误、素材错误或任务未开始运行：不收费。</li>
+            <li>任务失败：全额退回冻结积分。</li>
+            <li>任务开始运行后由商家取消：按成功价扣款，防止滥用。</li>
+            <li>可用积分不足 1 pt 时，API Key 暂停创建任务，但仍可查询状态和下载未过期视频。</li>
+            <li>输入素材在任务结束 24 小时后清理；输出视频在任务结束 72 小时后清理。请及时转存到自己的 COS / OSS / S3。</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="reference-section" id="errors">
+        <div class="section-marker">HTTP</div>
+        <div class="section-copy">
+          <h2>错误码</h2>
+          <div class="table-wrap api-table"><table>
+            <thead><tr><th>状态码</th><th>含义</th><th>处理方式</th></tr></thead>
+            <tbody>
+              <tr><td><code>401</code></td><td>API Key 缺失、错误或已撤销</td><td>检查 Bearer 格式；必要时在商家控制台创建新 Key。</td></tr>
+              <tr><td><code>402</code></td><td>积分不足</td><td>联系管理员充值；充值后有效 Key 自动恢复。</td></tr>
+              <tr><td><code>403</code></td><td>账户待开通或已暂停</td><td>联系管理员开通或解除暂停。</td></tr>
+              <tr><td><code>404</code></td><td>任务不存在</td><td>检查任务 ID；商家之间的数据严格隔离。</td></tr>
+              <tr><td><code>409</code></td><td>任务状态不允许该操作</td><td>例如已完成任务不能取消。</td></tr>
+              <tr><td><code>413</code></td><td>单文件或整次请求素材合计超过 512MB</td><td>压缩或减少素材后重新提交。</td></tr>
+              <tr><td><code>422</code></td><td>字段、素材数量或类型错误</td><td>根据响应中的 <code>detail</code> 修正请求；不扣积分。</td></tr>
+              <tr><td><code>429</code></td><td>商户已有 4 个未结束任务</td><td>等待已有任务完成后重试，并保留原 Idempotency-Key。</td></tr>
+            </tbody>
+          </table></div>
+          <div class="docs-boundary"><strong>文档边界</strong><p>本页仅描述商家可调用的视频创建、查询与取消接口。账户管理、积分调整和平台运维接口不属于商家 API，不公开其结构。</p></div>
+        </div>
+      </section>
+
+      <footer class="reference-footer"><span>EQUAI API · v1</span><a href="/#calls">返回调用记录</a></footer>
+    </main>
+  </div>
+  <div id="docsToast" class="toast hidden">已复制</div>
+  <script src="/docs.js?v=r25" defer></script>
+</body>
+</html>

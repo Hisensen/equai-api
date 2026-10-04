@@ -1,0 +1,3 @@
+[submodule "music-worker/yue-src"]
+	path = music-worker/yue-src
+	url = https://github.com/multimodal-art-projection/YuE.git

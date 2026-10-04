@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>H3 Admin</title><link rel="icon" type="image/png" href="/token-logo.png"><link rel="apple-touch-icon" href="/token-logo.png"><link rel="stylesheet" href="/styles.css?v=r36"></head>
+<body>
+  <header class="topbar"><div class="brand"><img class="brand-logo" src="/token-logo.png" alt="Equai"><span>Operations Admin</span></div><button id="adminLogout" class="btn ghost small hidden">退出</button></header>
+  <main id="adminLogin" class="auth-panel" style="min-height:calc(100vh - 64px)">
+    <form id="adminLoginForm" class="auth-card" method="post" action="/api/admin/login/form"><div class="eyebrow">Restricted operations</div><h2>管理员登录</h2><p class="muted">此入口只用于商户开通、积分调整和任务审计。</p><div class="field"><label for="adminPassword">管理员密码</label><input id="adminPassword" name="password" type="password" autocomplete="current-password" required></div><div id="adminError" class="form-error"></div><button class="btn primary full" type="submit">进入后台</button></form>
+  </main>
+  <main id="adminView" class="content hidden">
+    <div class="page-head"><div><div class="eyebrow">Merchant operations</div><h1>商户与积分</h1></div><div class="top-actions"><input id="merchantSearch" class="btn" placeholder="商户 ID / 登录名"><button id="searchBtn" class="btn">搜索</button></div></div>
+    <div class="notice">所有积分调整和账户状态变更都会留下管理员审计记录。视频文件到期清理不会删除这里的任务和账本。</div>
+    <nav class="admin-data-tabs" aria-label="数据视图">
+      <button class="admin-data-tab active" type="button" data-admin-panel="dailyPanel">每日任务量</button>
+      <button class="admin-data-tab" type="button" data-admin-panel="taskPanel">任务流水</button>
+      <button class="admin-data-tab" type="button" data-admin-panel="merchantPanel">商户</button>
+    </nav>
+    <section class="panel prompt-service-panel">
+      <div class="panel-head"><div><div class="eyebrow">Internal middleware</div><h2>提示词中间服务</h2></div><label class="settings-switch"><input id="promptServiceEnabled" type="checkbox"><span>自动处理后再投递 GPU</span></label></div>
+      <p class="muted">服务端按 T2VA、I2VA、FL2VA、Ref2VA 自动选择对应 H3 Skill 模板。地址与密钥不会发送到商户浏览器。</p>
+      <div class="settings-grid">
+        <div class="field"><label for="promptServiceUrl">OpenAI 兼容 API 地址</label><input id="promptServiceUrl" type="url" spellcheck="false" autocomplete="off" placeholder="https://api.deepseek.com"></div>
+        <div class="field"><label for="promptServiceKey">API Key</label><input id="promptServiceKey" type="password" autocomplete="new-password" placeholder="留空表示保留现有密钥"></div>
+      </div>
+      <div class="settings-actions"><button id="testPromptService" class="btn" type="button">测试连接</button><button id="savePromptService" class="btn primary" type="button">保存配置</button><span id="promptServiceStatus" class="muted">正在读取配置…</span></div>
+    </section>
+    <section id="dailyPanel" class="panel admin-data-panel">
+      <div class="panel-head"><div><div class="eyebrow">Daily volume</div><h2>每日任务量</h2></div><select id="statsDays" class="btn"><option value="7">近 7 天</option><option value="14" selected>近 14 天</option><option value="30">近 30 天</option><option value="90">近 90 天</option></select></div>
+      <div id="dailyTable"><div class="empty">正在读取…</div></div>
+    </section>
+    <section id="taskPanel" class="panel admin-data-panel hidden">
+      <div class="panel-head"><div><div class="eyebrow">Task stream</div><h2>任务流水 · 按时间倒序</h2></div><div class="top-actions"><input id="taskMerchant" class="btn" placeholder="商户 / 登录名"><select id="taskStatus" class="btn"><option value="">全部状态</option><option value="queued">排队中</option><option value="dispatching">投递中</option><option value="running">生成中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><select id="taskKind" class="btn"><option value="">全部类型</option><option value="text">文生</option><option value="image">首尾帧</option><option value="reference">多参考</option><option value="long_text">长视频</option><option value="image_edit">图片编辑</option></select><select id="taskSince" class="btn"><option value="1">近 1 天</option><option value="7" selected>近 7 天</option><option value="30">近 30 天</option><option value="90">近 90 天</option></select><button id="taskRefresh" class="btn">刷新</button></div></div>
+      <div id="taskTable"><div class="empty">正在读取…</div></div>
+      <div class="settings-actions"><button id="taskPrev" class="btn small">上一页</button><button id="taskNext" class="btn small">下一页</button><span id="taskPage" class="muted"></span></div>
+    </section>
+    <section id="merchantPanel" class="panel admin-data-panel hidden"><div id="merchantTable"></div></section>
+    <section id="merchantDetail" class="panel hidden"><div class="panel-head"><h2 id="detailTitle">商户详情</h2><button id="closeDetail" class="btn small">关闭</button></div><div id="detailBody"></div></section>
+  </main>
+  <div id="toast" class="toast hidden"></div><script src="/admin.js?v=r43-total-concurrency-cap5" defer></script>
+</body>
+</html>

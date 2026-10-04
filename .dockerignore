@@ -1,0 +1,13 @@
+.git
+.env
+*.env
+__pycache__
+*.py[cod]
+*_tmp.py
+*.sqlite3*
+*.mp4
+!portal/equai-bg.mp4
+!portal/equai-login-bg.mp4
+*.safetensors
+data
+backups

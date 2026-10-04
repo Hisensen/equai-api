@@ -1,0 +1,14 @@
+FROM equai-api:ffmpeg-r107
+
+USER root
+RUN sed -i 's#http://deb.debian.org/debian-security#https://mirrors.cloud.tencent.com/debian-security#; s#http://deb.debian.org/debian#https://mirrors.cloud.tencent.com/debian#g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY *.py /app/
+COPY reenact /app/reenact
+COPY portal /app/portal
+RUN chown -R h3:h3 /app
+USER h3
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]

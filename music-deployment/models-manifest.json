@@ -1,0 +1,42 @@
+{
+  "release": "2026-09-29-yue2-sheetsage2",
+  "source_priority": ["modelscope", "huggingface"],
+  "cos_prefix": "models/h3-standard/music/2026-09-29-yue2-sheetsage2",
+  "models": [
+    {
+      "name": "YuE2-3B",
+      "source": "m-a-p/YuE2-3B",
+      "provider": "modelscope",
+      "target": "yue2/YuE2-3B",
+      "approx_bytes": 7300000000
+    },
+    {
+      "name": "YuE2-Vae",
+      "source": "m-a-p/YuE2-Vae",
+      "provider": "modelscope",
+      "target": "yue2-vae/YuE2-Vae",
+      "approx_bytes": 531000000
+    },
+    {
+      "name": "SheetSage2",
+      "source": "m-a-p/SheetSage2",
+      "provider": "modelscope",
+      "target": "sheetsage2/SheetSage2",
+      "approx_bytes": 229000000
+    },
+    {
+      "name": "MERT-v2-FullSong",
+      "source": "m-a-p/MERT-v2-FullSong",
+      "provider": "modelscope",
+      "target": "mert/MERT-v2-FullSong",
+      "approx_bytes": 2530000000
+    }
+  ],
+  "requirements": {
+    "gpu_vram_gb": 24,
+    "local_disk_free_gb_recommended": 40,
+    "single_gpu_queue": true,
+    "download_to_cos": true,
+    "prewarm_on_worker_start": true
+  }
+}
