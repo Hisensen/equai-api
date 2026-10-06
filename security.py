@@ -144,7 +144,7 @@ def video_merchant(
         "/api/account/videos/", "/api/account/remix/", "/api/account/remix2/",
         "/api/account/commerce-remix/", "/api/account/video-edits/",
         "/api/account/image-edits", "/api/account/creative/",
-        "/api/account/digital-human/", "/api/account/digital-human2/",
+        "/api/account/digital-human/",
     )):
         origin = request.headers.get("origin", "").strip()
         if origin:

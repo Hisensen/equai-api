@@ -59,7 +59,6 @@ from object_storage import (
     verify_upload_grant,
 )
 from security import api_merchant, portal_merchant, video_merchant
-from prompt_templates import digital_human_h3_prompt
 from transfer_storage import (
     backend as transfer_backend,
 )
@@ -144,6 +143,10 @@ def _task_view(
         elif with_download and not output_expired and item.get("key"):
             public["download_url"] = presigned_url(item["key"], download=True, expires=3600)
             public["download_url_expires_in"] = 3600
+        if not output_expired and value["status"] == "completed" and public["media"] in {"video", "image"}:
+            base = f"/api/account/tasks/{value['id']}/preview"
+            public["preview_url"] = f"{base}/media"
+            public["poster_url"] = f"{base}/poster"
         visible.append(public)
     started = value["started_at"]
     finished = value["finished_at"]
@@ -207,7 +210,31 @@ def _get_task(merchant_id: str, task_id: str):
 
 def _get_portal_task(merchant_id: str, task_id: str):
     row = _get_task(merchant_id, task_id)
-    return row if row and row["portal_hidden_at"] is None else None
+    return row if row and row["portal_hidden_at"] is None and _retained_output_exists(row) else None
+
+
+def _retained_output_exists(row) -> bool:
+    """Hide completed local outputs whose original file was already removed."""
+    if row["status"] != "completed":
+        return True
+    artifacts = json.loads(row["artifacts"] or "[]")
+    deliverables = [item for item in artifacts if item.get("media") in {"video", "image", "audio"}]
+    if not deliverables:
+        return False
+    # The UI selects the first playable deliverable. If that exact file was
+    # removed from the local output volume, hide the task instead of showing a
+    # card that can never preview, even when a later auxiliary file remains.
+    item = next(
+        (artifact for artifact in deliverables if artifact.get("media") in {"video", "image"}),
+        deliverables[0],
+    )
+    if item.get("storage") != "local":
+        return True  # COS availability is governed by the recorded expiry.
+    try:
+        resolve_local_output(str(item["path"]))
+        return True
+    except (KeyError, FileNotFoundError, ValueError):
+        return False
 
 
 def _sniff_header(header: bytes) -> str | None:
@@ -578,19 +605,6 @@ async def _remove_uploaded_inputs(objects: list[dict]) -> None:
         await asyncio.to_thread(delete_keys, remote)
 
 
-def _digital_human_prompts(
-    duration: float, ratio: str, direction: str = "", compiled_prompt: str = "",
-) -> list[str]:
-    from long_video_api import digital_human_segment_count
-
-    count = digital_human_segment_count(duration)
-    # Both avatar tools use the same short prompt. Each window uploads its own
-    # Audio 1; latent context handles continuity without extra prose. Canvas
-    # ratio is an API parameter, so the prompt does not prescribe another one.
-    prompt = compiled_prompt.strip() or digital_human_h3_prompt(direction)
-    return [prompt] * count
-
-
 def _uploaded_audio_seconds(upload: UploadFile) -> float:
     upload.file.seek(0)
     holder = tempfile.TemporaryDirectory(prefix="digital-human-audio-")
@@ -614,36 +628,42 @@ def _uploaded_audio_seconds(upload: UploadFile) -> float:
 
 
 @router.post("/api/account/digital-human/720p", status_code=202, include_in_schema=False)
-@router.post("/api/account/digital-human2/720p", status_code=202, include_in_schema=False)
 async def create_digital_human(
     request: Request,
     merchant: Annotated[dict, Depends(video_merchant)],
     mode: Annotated[str, Form()],
     image: Annotated[UploadFile, File()],
-    emotion: Annotated[str, Form()] = "",
     audio: Annotated[UploadFile | None, File()] = None,
-    ratio: Annotated[str, Form()] = "9:16",
+    ratio: Annotated[str, Form()] = "16:9",
+    prompt: Annotated[str, Form()] = "",
     title: Annotated[str, Form()] = "数字人",
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict:
     from long_video_api import (
         DIGITAL_HUMAN_MIN_DURATION, MAX_DURATION, PRICE_PER_SEGMENT_MILLI,
-        digital_human_render_duration, digital_human_segment_count,
+        digital_human_segment_count,
     )
 
-    mode, ratio, emotion = mode.strip().lower(), ratio.strip(), emotion.strip()
+    mode, ratio = mode.strip().lower(), ratio.strip()
+    from digital_human_prompt import compose_digital_human_workflow_prompt
+
+    direction = prompt.strip()
+    if len(direction) > 30000:
+        raise HTTPException(422, "额外提示词不能超过 30000 个字符")
+    try:
+        workflow_prompt = compose_digital_human_workflow_prompt(direction)
+    except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        raise HTTPException(500, "数字人工作流提示词模板无法读取") from exc
     if mode != "audio":
         raise HTTPException(422, "数字人目前仅支持上传音频驱动")
     if ratio not in {"16:9", "9:16"}:
-        raise HTTPException(422, "画幅只能是 16:9 或 9:16")
+        raise HTTPException(422, "数字人画幅只能是 16:9 或 9:16")
     if not image.filename or Path(image.filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"} or (image.size or 0) > 30 * 1024**2:
         raise HTTPException(422, "请上传 30 MB 以内的 PNG、JPEG 或 WebP 人物图")
     image.file.seek(0)
     if _sniff_header(image.file.read(16)) != "image":
         raise HTTPException(422, "人物图文件内容不是有效的 PNG、JPEG 或 WebP 图片")
     image.file.seek(0)
-    if len(emotion) > 1000:
-        raise HTTPException(422, "情绪和动作提示不能超过 1000 字符")
     if not audio or not audio.filename:
         raise HTTPException(422, "请上传一段音频")
     if Path(audio.filename).suffix.lower() not in {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"} or (audio.size or 0) > 300 * 1024**2:
@@ -651,11 +671,13 @@ async def create_digital_human(
     duration = _uploaded_audio_seconds(audio)
     if not DIGITAL_HUMAN_MIN_DURATION <= duration <= MAX_DURATION:
         raise HTTPException(422, f"数字人音频时长须为 {DIGITAL_HUMAN_MIN_DURATION}–{MAX_DURATION} 秒")
-    render_duration = digital_human_render_duration(duration)
+    render_duration = duration
     segments = digital_human_segment_count(duration)
     price_milli = PRICE_PER_SEGMENT_MILLI * segments
     identity = {"mode": mode, "duration": duration, "ratio": ratio,
-                "emotion": emotion, "image": [image.filename, image.size],
+                "prompt": direction,
+                "workflow_id": "digital_human_image_audio_v1",
+                "image": [image.filename, image.size],
                 "audio": [audio.filename, audio.size] if audio and audio.filename else None}
     request_hash = hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     if idempotency_key:
@@ -680,29 +702,11 @@ async def create_digital_human(
                                      shrink_images=True))
         objects.append(await _upload(merchant["id"], task_id, 1, "audios", audio,
                                      force_local=request.url.path.startswith("/api/account/")))
-        compiled_prompt = ""
-        if emotion:
-            import prompt_service
-
-            try:
-                compiled = await prompt_service.compile_digital_human_prompt(
-                    direction=emotion, duration=duration, ratio=ratio,
-                )
-                compiled_prompt = str(compiled.get("prompt") or "").strip()[:30000]
-            except Exception as exc:
-                log.warning("Digital-human H3 prompt formatting failed; using local format (%s)", type(exc).__name__)
-        prompts = _digital_human_prompts(
-            render_duration, ratio,
-            direction="" if compiled_prompt else emotion,
-            compiled_prompt=compiled_prompt,
-        )
-        digital_human2 = request.url.path.rstrip("/").endswith("digital-human2/720p")
-        payload = {"mode": "long_avatar_selflift" if digital_human2 else "long_avatar", "avatar_mode": "audio", "tier": "720p",
-                   "prompt": prompts[0], "segment_prompts": prompts,
-                   "duration": render_duration, "source_audio_duration": duration,
-                   "ratio": ratio, "quality": 0.9, "seed": 0,
-                   "_tool": "digital_human2" if digital_human2 else "digital_human", "_prompt_compiled": True,
-                   "_original_prompt": "\n\n--- SEGMENT ---\n\n".join(prompts),
+        payload = {"mode": "digital_human_workflow", "workflow_id": "digital_human_image_audio_v1", "tier": "720p",
+                   "duration": duration, "source_audio_duration": duration,
+                   "ratio": ratio, "quality": 0.9, "megapixels": 1.0,
+                   "prompt": workflow_prompt,
+                   "_tool": "digital_human", "_prompt_compiled": True,
                    "_transfer_backend": "local"}
         now = time.time()
         with transaction() as db:
@@ -1298,7 +1302,7 @@ def portal_tasks(
     limit: int = 100,
     tool: str | None = None,
 ) -> dict:
-    allowed = {"video", "remix", "commerce_remix", "reenact", "image_edit", "digital_human", "digital_human2"}
+    allowed = {"video", "remix", "commerce_remix", "reenact", "image_edit", "digital_human"}
     if tool is not None and (not tool.strip() or any(item.strip() not in allowed for item in tool.split(","))):
         raise HTTPException(422, "任务类型不正确")
     return _list_for(account["id"], status, limit, hide_from_portal=True, tool=tool)
@@ -1329,6 +1333,30 @@ def portal_task(task_id: str, account: Annotated[dict, Depends(portal_merchant)]
     if not row:
         raise HTTPException(404, "任务不存在")
     return _task_view(row, include_prompts=True)
+
+
+@router.get("/api/account/tasks/{task_id}/preview/{mode}")
+def portal_task_preview(
+    task_id: str, mode: str, account: Annotated[dict, Depends(portal_merchant)],
+) -> FileResponse:
+    from media_preview import create_preview
+
+    if mode not in {"poster", "media"}:
+        raise HTTPException(404, "预览不存在")
+    row = _get_portal_task(account["id"], task_id)
+    if not row or row["status"] != "completed" or (row["output_expires_at"] and row["output_expires_at"] <= time.time()):
+        raise HTTPException(404, "作品不存在或已过期")
+    artifact = next((item for item in json.loads(row["artifacts"] or "[]") if item.get("media") in {"video", "image"}), None)
+    if not artifact:
+        raise HTTPException(404, "作品文件不存在")
+    try:
+        path, content_type = create_preview(account["id"], task_id, artifact, mode)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(404, "作品文件不存在") from None
+    except Exception:
+        log.exception("Task preview generation failed for %s", task_id)
+        raise HTTPException(503, "预览暂不可用，请稍后重试") from None
+    return FileResponse(path, media_type=content_type, content_disposition_type="inline", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.patch("/api/account/tasks/{task_id}/note")
@@ -1365,7 +1393,7 @@ def hide_portal_task(
         ).fetchone()
         if not row or row["portal_hidden_at"] is not None:
             raise HTTPException(404, "任务不存在")
-        if row["status"] in {"queued", "dispatching", "running"}:
+        if row["status"] in {"queued", "dispatching", "running", "music_queued", "music_dispatching", "music_running", "awaiting_lyrics"}:
             raise HTTPException(409, "任务正在生成，请先取消后再删除")
         db.execute(
             "UPDATE merchant_tasks SET portal_hidden_at=? WHERE id=? AND merchant_id=?",
@@ -1442,4 +1470,4 @@ def _list_for(
             {where} GROUP BY t.id ORDER BY t.created_at DESC LIMIT ?""",
             params,
         ).fetchall()
-    return {"items": [_task_view(row, with_download=False) for row in rows]}
+    return {"items": [_task_view(row, with_download=False) for row in rows if _retained_output_exists(row)]}

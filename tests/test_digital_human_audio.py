@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-import wave
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,22 +14,13 @@ from starlette.datastructures import UploadFile
 from starlette.requests import Request
 
 from security import video_merchant
-from video_api import _digital_human_prompts
 
 
-from worker_long.audio_utils import _preserve_source_audio, _split_avatar_audio
+from worker_long.audio_utils import _preserve_source_audio
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is required")
 class DigitalHumanAudioTest(unittest.TestCase):
-    def test_audio_prompts_use_multireference_picture_and_audio_mapping(self) -> None:
-        prompts = _digital_human_prompts(16, "9:16", "温和自然")
-        self.assertEqual(2, len(prompts))
-        self.assertTrue(all("<Picture 1>" in prompt and "<Audio 1>" in prompt for prompt in prompts))
-        self.assertTrue(all("<Subject 1> 跟随 <Audio 1> 的内容表演" in prompt for prompt in prompts))
-        self.assertTrue(all("口型严格与 <Audio 1> 同步" in prompt for prompt in prompts))
-        self.assertTrue(all("保留 <Audio 1> 原声" in prompt for prompt in prompts))
-        self.assertTrue(all("温和自然" in prompt for prompt in prompts))
 
     def test_legacy_text_mode_is_rejected(self) -> None:
         from video_api import create_digital_human
@@ -64,43 +54,7 @@ class DigitalHumanAudioTest(unittest.TestCase):
         session.assert_called_once_with("portal-session", "merchant")
         api_key_auth.assert_not_called()
 
-    def test_audio_is_windowed_at_the_latent_overlap_boundary(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            source_audio = folder / "uploaded.wav"
-            subprocess.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=16",
-                "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", str(source_audio),
-            ], check=True)
-            segments = _split_avatar_audio(source_audio, [362, 56], folder)
-            self.assertEqual(2, len(segments))
-            durations = []
-            for segment in segments:
-                result = subprocess.run([
-                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1", str(segment),
-                ], check=True, capture_output=True, text=True)
-                durations.append(float(result.stdout.strip()))
-            self.assertAlmostEqual(362 / 24, durations[0], delta=0.03)
-            self.assertAlmostEqual(56 / 24, durations[1], delta=0.03)
-            with wave.open(str(source_audio), "rb") as original, wave.open(str(segments[1]), "rb") as continuation:
-                original.setpos((362 - 22) * 48000 // 24)
-                self.assertEqual(original.readframes(4800), continuation.readframes(4800))
 
-    def test_third_audio_window_uses_cumulative_delivered_frames(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            source_audio = folder / "uploaded.wav"
-            subprocess.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=32",
-                "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", str(source_audio),
-            ], check=True)
-            segments = _split_avatar_audio(source_audio, [362, 379, 56], folder)
-            with wave.open(str(source_audio), "rb") as original, wave.open(str(segments[2]), "rb") as continuation:
-                original.setpos((362 + 379 - 22 - 22) * 48000 // 24)
-                self.assertEqual(original.readframes(4800), continuation.readframes(4800))
 
     def test_final_video_keeps_the_uploaded_pcm_audio_samples(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -161,36 +115,6 @@ class DigitalHumanAudioTest(unittest.TestCase):
             self.assertEqual(["aac", "mp3"], [stream["codec_name"] for stream in audio])
             self.assertEqual([1, 0], [stream["disposition"]["default"] for stream in audio])
 
-    def test_subsecond_tail_is_cut_from_h3_reference_and_final_audio(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            source_audio = folder / "uploaded.wav"
-            video = folder / "generated.mp4"
-            subprocess.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=15.8",
-                "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", str(source_audio),
-            ], check=True)
-            subprocess.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "color=c=black:s=320x240:r=24:d=15.083333",
-                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video),
-            ], check=True)
-
-            reference = _split_avatar_audio(source_audio, [362], folder, target_duration=15)[0]
-            final = _preserve_source_audio(video, source_audio, 15)
-            for path, expected in ((reference, 362 / 24), (final, 15)):
-                probe = subprocess.run([
-                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1", str(path),
-                ], check=True, capture_output=True, text=True)
-                self.assertAlmostEqual(expected, float(probe.stdout.strip()), delta=0.05)
-            frames = subprocess.run([
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=nb_frames",
-                "-of", "default=noprint_wrappers=1:nokey=1", str(final),
-            ], check=True, capture_output=True, text=True)
-            self.assertEqual("360", frames.stdout.strip())
 
 
 if __name__ == "__main__":

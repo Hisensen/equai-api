@@ -1,52 +1,10 @@
-"""Audio splitting and lossless source-audio mux for long digital-human jobs."""
+"""Lossless source-audio mux helpers for generated videos."""
 
 from __future__ import annotations
 
-import subprocess
 import math
+import subprocess
 from pathlib import Path
-
-
-def _split_avatar_audio(
-    source: Path, lengths: list[int], folder: Path,
-    target_duration: float | None = None,
-) -> list[Path]:
-    """Make one H3 reference clip per linked segment, including its overlap head."""
-    parts = []
-    delivered_frames = 0
-    for index, frames in enumerate(lengths):
-        # H3 frame counts land on a 17-frame grid, so a generated 15-second
-        # section usually ends a few frames away from the nominal boundary.
-        # Align the reference audio to the actual delivered video frame where
-        # this section begins, including its 22-frame latent context.
-        start_frame = 0 if index == 0 else max(0, delivered_frames - 22)
-        start, duration = start_frame / 24, frames / 24
-        source_window = (
-            duration if target_duration is None
-            else max(0.0, min(duration, target_duration - start))
-        )
-        if source_window <= 0:
-            raise ValueError("数字人音频分段超出目标时长")
-        target = folder / f"avatar-audio-{index:02d}.wav"
-        # Trim on the decoded stream.  Packet seeking is inaccurate for MP3
-        # (the common upload format) and can move a continuation window by a
-        # packet or more, which is enough to make the second segment's mouth
-        # drift against the original speech.  The audio reference must start
-        # at the exact latent overlap boundary.
-        subprocess.run([
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-i", str(source), "-t", f"{duration:.6f}",
-            "-vn", "-af", (
-                f"atrim=start={start:.6f}:duration={source_window:.6f},"
-                "asetpts=PTS-STARTPTS,"
-                f"apad=whole_dur={duration:.6f}"
-            ), "-ar", "48000",
-            "-ac", "2", "-c:a", "pcm_s16le", str(target),
-        ], check=True, timeout=300)
-        parts.append(target)
-        delivered_frames += frames if index == 0 else frames - 22
-    return parts
-
 
 def _preserve_source_audio(video: Path, source_audio: Path, duration: float) -> Path:
     """Replace generated audio with the original track, losslessly where needed."""

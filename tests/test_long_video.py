@@ -11,14 +11,55 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from long_video_api import (
-    LongVideoRequest, digital_human_render_duration,
+    LongVideoRequest,
     digital_human_segment_count, segment_count, validate_long_request,
 )
-from worker_long.long_video import avatar_segment_lengths, long_chunk_workflow, long_workflow, segment_lengths
-from video_api import _digital_human_prompts
+from worker_long.long_video import _digital_human_workflow_graph, long_chunk_workflow, long_workflow, segment_lengths
 
 
 class LongVideoApiTest(unittest.TestCase):
+    def test_active_digital_human_graph_matches_workflow_verbatim(self) -> None:
+        workflow_path = Path(__file__).parents[1] / "worker_long/workflows/digital_human_image_audio_v1.json"
+        original = json.loads(workflow_path.read_text())
+        graph = _digital_human_workflow_graph(
+            "digital_human_image_audio_v1", "portrait.png", "voice.wav", 1.0
+        )
+        self.assertEqual(original["136"]["inputs"]["prompt"], graph["136"]["inputs"]["prompt"])
+        self.assertEqual(original["276"]["inputs"]["prompt"], graph["276"]["inputs"]["prompt"])
+        self.assertEqual(original["261"]["inputs"]["seed"], graph["261"]["inputs"]["seed"])
+        self.assertEqual(original["284"]["inputs"]["seed"], graph["284"]["inputs"]["seed"])
+        self.assertEqual(1.0, original["115"]["inputs"]["megapixels"])
+        self.assertEqual(1.0, graph["115"]["inputs"]["megapixels"])
+        self.assertEqual("16:9 (Widescreen)", graph["115"]["inputs"]["aspect_ratio"])
+        portrait_graph = _digital_human_workflow_graph(
+            "digital_human_image_audio_v1", "portrait.png", "voice.wav", 1.0, "9:16"
+        )
+        self.assertEqual("9:16 (Portrait Widescreen)", portrait_graph["115"]["inputs"]["aspect_ratio"])
+        self.assertEqual(1.0, portrait_graph["115"]["inputs"]["megapixels"])
+        extra_prompt = "保持人物衣着和背景不变，轻轻点头。"
+        prompted_graph = _digital_human_workflow_graph(
+            "digital_human_image_audio_v1", "portrait.png", "voice.wav", 1.0,
+            "9:16", "template\n\nAdditional user direction (verbatim):\n" + extra_prompt,
+        )
+        self.assertEqual(prompted_graph["136"]["inputs"]["prompt"], prompted_graph["276"]["inputs"]["prompt"])
+        self.assertIn(extra_prompt, prompted_graph["136"]["inputs"]["prompt"])
+        self.assertEqual(
+            "official/minimax_h3_video_vae_int8_convrot.safetensors",
+            graph["119"]["inputs"]["vae_name"],
+        )
+        self.assertEqual(
+            "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            graph["128"]["inputs"]["clip_name"],
+        )
+        self.assertEqual("portrait.png", graph["268"]["inputs"]["image"])
+        self.assertEqual("voice.wav", graph["232"]["inputs"]["audio"])
+        for node in ("261", "284"):
+            self.assertEqual("minimax_h3_latent_upscaler_3d_fp16.safetensors", graph[node]["inputs"]["upscaler_model"])
+        self.assertNotIn("195", graph)
+        self.assertEqual("CreateVideo", graph["9000"]["class_type"])
+        self.assertEqual(["122", 0], graph["9000"]["inputs"]["images"])
+        self.assertEqual(["232", 0], graph["9000"]["inputs"]["audio"])
+        self.assertEqual("SaveVideo", graph["9001"]["class_type"])
     def test_segment_count_matches_validated_motion_context_examples(self) -> None:
         self.assertEqual(segment_count(15), 1)
         self.assertEqual(segment_count(15.024), 1)
@@ -75,7 +116,7 @@ class LongVideoApiTest(unittest.TestCase):
             lengths, _ = segment_lengths(duration)
             self.assertEqual(1, len(lengths))
 
-    def test_worker_accepts_single_prompt_avatar_audio_payload(self) -> None:
+    def test_worker_rejects_retired_dynamic_avatar_mode(self) -> None:
         runpod = types.ModuleType("runpod")
         network = types.ModuleType("network_bootstrap")
         network.install_transfer_host_mapping = lambda: None
@@ -83,42 +124,28 @@ class LongVideoApiTest(unittest.TestCase):
         storage.upload_outputs = lambda *_args, **_kwargs: None
         audio = types.ModuleType("audio_utils")
         audio._preserve_source_audio = lambda *_args, **_kwargs: None
-        audio._split_avatar_audio = lambda *_args, **_kwargs: None
-        import worker_long.long_video as long_video_module
         with patch.dict(sys.modules, {
             "runpod": runpod, "network_bootstrap": network,
             "object_storage": storage, "audio_utils": audio,
-            "long_video": long_video_module,
         }):
             from worker_long.handler import _payload
-
-            mode, payload = _payload({
-                "mode": "long_avatar", "avatar_mode": "audio", "duration": 8,
-                "segment_prompts": ["Speak the uploaded audio"],
-                "ratio": "9:16", "seed": 7,
-            })
-        self.assertEqual("long_avatar", mode)
-        self.assertEqual(8, payload["duration"])
-        self.assertEqual(1, len(json.loads(payload["prompts_json"])))
-
+            with self.assertRaises(ValueError):
+                _payload({
+                    "mode": "long_avatar", "avatar_mode": "audio", "duration": 8,
+                    "segment_prompts": ["old prompt"], "ratio": "9:16",
+                })
     def test_worker_follows_user_visible_15_second_boundaries(self) -> None:
         self.assertEqual(2, len(segment_lengths(23)[0]))
         self.assertEqual(3, len(segment_lengths(32)[0]))
         self.assertEqual(4, len(segment_lengths(60)[0]))
 
-    def test_digital_human_drops_subsecond_tail_at_each_15_second_boundary(self) -> None:
-        for duration, expected_duration, expected_segments in (
-            (15, 15, 1), (15.024, 15, 1), (15.8, 15, 1),
-            (15.999, 15, 1), (16, 16, 2),
-            (30.5, 30, 2), (30.999, 30, 2), (31, 31, 3),
-            (45.8, 45, 3), (46, 46, 4), (60, 60, 4),
+    def test_digital_human_pricing_counts_full_audio_in_15_second_units(self) -> None:
+        for duration, expected_segments in (
+            (1, 1), (15, 1), (15.8, 1), (16, 2),
+            (30, 2), (31, 3), (45.8, 3), (46, 4), (60, 4),
         ):
-            self.assertEqual(expected_duration, digital_human_render_duration(duration))
             self.assertEqual(expected_segments, digital_human_segment_count(duration))
-            lengths, rendered = avatar_segment_lengths(duration)
-            self.assertEqual(expected_segments, len(lengths))
-            self.assertLess(abs(rendered - expected_duration * 24), 17)
-            self.assertEqual(expected_segments, len(_digital_human_prompts(duration, "9:16")))
+
 
     def test_worker_concatenates_inside_comfy_before_single_encode(self) -> None:
         graph, lengths, _ = long_workflow(
@@ -219,143 +246,19 @@ class LongVideoApiTest(unittest.TestCase):
         self.assertEqual("LTXVConcatAVLatent", graph["9"]["class_type"])
         self.assertEqual(18, graph["112"]["inputs"]["trim_frames"])
 
-    def test_digital_human_uses_person_audio_and_keeps_latent_continuity(self) -> None:
-        profile = types.SimpleNamespace(
-            fl_model="fl.safetensors", ref_model="ref.safetensors",
-            text_encoder="text.safetensors", video_vae="video.safetensors",
-            audio_vae="audio.safetensors", ref_lora="ref-lora.safetensors",
-        )
-        module = types.ModuleType("h3_profiles")
-        module.get_profile = lambda _name: profile
-        with patch.dict(sys.modules, {"h3_profiles": module}):
-            graph, lengths, _ = long_workflow(
-                ["Speak the opening", "Continue speaking"], 30, "9:16", 17,
-                avatar_image="person.png", audio_segments=["voice-1.wav", "voice-2.wav"],
-            )
-        self.assertEqual(2, len(lengths))
-        self.assertEqual("MiniMaxH3Easy", graph["101"]["class_type"])
-        first = graph["101"]["inputs"]
-        self.assertEqual("reference", first["mode"])
-        self.assertEqual("image", first["media_type_1"])
-        self.assertEqual("audio", first["media_type_2"])
-        self.assertEqual("person.png", graph["100"]["inputs"]["image"])
-        self.assertEqual("voice-1.wav", graph["103"]["inputs"]["audio"])
-        self.assertEqual("Speak the opening", first["prompt"])
-        self.assertNotIn("130", graph)
-        self.assertEqual("voice-2.wav", graph["133"]["inputs"]["audio"])
-        self.assertEqual(["100", 0], graph["131"]["inputs"]["media_1"])
-        self.assertEqual(["133", 0], graph["131"]["inputs"]["media_2"])
-        self.assertEqual("SolAttnMiniMax", graph["129"]["class_type"])
-        self.assertEqual(["101", 0], graph["129"]["inputs"]["model"])
-        self.assertEqual(["129", 0], graph["105"]["inputs"]["model"])
-        self.assertEqual(["105", 0], graph["106"]["inputs"]["model"])
-        self.assertEqual(["106", 0], graph["108"]["inputs"]["model"])
-        self.assertEqual(graph["108"]["inputs"]["model"], graph["109"]["inputs"]["model"])
-        self.assertEqual(["111", 0], graph["134"]["inputs"]["context_latent"])
-        self.assertEqual("MiniMaxH3MotionContext", graph["134"]["class_type"])
-        self.assertEqual(1, sum(node["class_type"] == "SaveVideo" for node in graph.values()))
 
-    def test_digital_human_continuation_chunk_keeps_audio_refs_and_saves_latents(self) -> None:
-        from worker_long.long_video import _avatar_long_workflow
 
-        profile = types.SimpleNamespace(
-            fl_model="fl.safetensors", ref_model="ref.safetensors",
-            text_encoder="text.safetensors", video_vae="video.safetensors",
-            audio_vae="audio.safetensors", ref_lora="ref-lora.safetensors",
-        )
-        module = types.ModuleType("h3_profiles")
-        module.get_profile = lambda _name: profile
-        with patch.dict(sys.modules, {"h3_profiles": module}):
-            graph, _, _ = _avatar_long_workflow(
-                ["Continue speaking"], [362], 362, "9:16", 17,
-                "person.png", ["voice-4.wav"], 15,
-                "prior-video.latent", "prior-audio.latent", 3,
-                persist_latent=True,
-            )
-        self.assertEqual("MiniMaxH3Easy", graph["101"]["class_type"])
-        self.assertEqual("voice-4.wav", graph["103"]["inputs"]["audio"])
-        self.assertNotIn("1001", graph)
-        self.assertEqual(["102", 1], graph["104"]["inputs"]["latent"])
-        self.assertEqual(["102", 1], graph["112"]["inputs"]["latent_image"])
-        self.assertEqual(["4", 0], graph["104"]["inputs"]["context_latent"])
-        self.assertEqual(18, graph["122"]["inputs"]["trim_frames"])
-        self.assertEqual("SaveLatent", graph["9011"]["class_type"])
-        self.assertEqual("SaveLatent", graph["9012"]["class_type"])
 
-    def test_chunked_avatar_uses_current_audio_and_prior_motion(self) -> None:
-        from worker_long.long_video import _avatar_long_workflow
 
-        profile = types.SimpleNamespace(
-            fl_model="fl.safetensors", ref_model="ref.safetensors",
-            text_encoder="text.safetensors", video_vae="video.safetensors",
-            audio_vae="audio.safetensors", ref_lora="ref-lora.safetensors",
-        )
-        module = types.ModuleType("h3_profiles")
-        module.get_profile = lambda _name: profile
-        with patch.dict(sys.modules, {"h3_profiles": module}):
-            graph, _, _ = _avatar_long_workflow(
-                ["Continue singing"], [345], 345, "9:16", 17,
-                "person.png", ["voice-2.wav"], 345 / 24,
-                "prior-video.latent", "prior-audio.latent", 1,
-                persist_latent=True, selflift=True,
-            )
-        self.assertEqual(345 / 24, graph["101"]["inputs"]["seconds"])
-        self.assertEqual(["103", 0], graph["1001"]["inputs"]["audio"])
-        self.assertEqual(["1004", 0], graph["112"]["inputs"]["latent_image"])
-        self.assertEqual(["4", 0], graph["104"]["inputs"]["context_latent"])
+    def test_workflow_resolution_helper_aligns_to_canvas_multiple(self) -> None:
+        from worker_long.long_video import megapixel_dimensions
 
-    def test_digital_human2_uses_only_the_selflift_avatar_sampler(self) -> None:
-        from worker_long.long_video import _avatar_long_workflow
+        self.assertEqual((1344, 736), megapixel_dimensions("16:9", 1.0))
+        with self.assertRaises(ValueError):
+            megapixel_dimensions("4:3", 1.0)
 
-        profile = types.SimpleNamespace(
-            fl_model="fl.safetensors", ref_model="ref.safetensors",
-            text_encoder="text.safetensors", video_vae="video.safetensors",
-            audio_vae="audio.safetensors", ref_lora="ref-lora.safetensors",
-        )
-        module = types.ModuleType("h3_profiles")
-        module.get_profile = lambda _name: profile
-        with patch.dict(sys.modules, {"h3_profiles": module}):
-            graph, _, _ = _avatar_long_workflow(
-                ["<Picture 1> speaks <Audio 1>"], [362], 362, "9:16", 17,
-                "person.png", ["voice.wav"], 15, selflift=True,
-            )
-        samplers = [node for node in graph.values()
-                    if node.get("class_type") in {"SelfLiftAvatarH3Sampler", "SamplerCustomAdvanced"}]
-        self.assertEqual(["SelfLiftAvatarH3Sampler"], [node["class_type"] for node in samplers])
-        self.assertEqual(6, samplers[0]["inputs"]["transition_step"])
-        self.assertEqual(0.5, samplers[0]["inputs"]["lowres_scale"])
-        self.assertEqual(0.6, samplers[0]["inputs"]["rho"])
 
-    def test_digital_human2_audio_mask_is_attached_to_each_segment(self) -> None:
-        from worker_long.long_video import _avatar_long_workflow
-
-        profile = types.SimpleNamespace(
-            fl_model="fl.safetensors", ref_model="ref.safetensors",
-            text_encoder="text.safetensors", video_vae="video.safetensors",
-            audio_vae="audio.safetensors", ref_lora="ref-lora.safetensors",
-        )
-        module = types.ModuleType("h3_profiles")
-        module.get_profile = lambda _name: profile
-        with patch.dict(sys.modules, {"h3_profiles": module}):
-            graph, _, _ = _avatar_long_workflow(
-                ["one", "two"], [362, 345], 685, "9:16", 17,
-                "person.png", ["voice-1.wav", "voice-2.wav"], 27.6,
-                selflift=True,
-            )
-        self.assertEqual("SetLatentNoiseMask", graph["1103"]["class_type"])
-        self.assertEqual("LTXVConcatAVLatent", graph["1104"]["class_type"])
-        self.assertEqual(["1104", 0], graph["134"]["inputs"]["latent"])
-        self.assertEqual(["1004", 0], graph["111"]["inputs"]["latent_image"])
-        self.assertEqual(["1104", 0], graph["142"]["inputs"]["latent_image"])
-        for base, audio, output in ((1000, "103", "102"), (1100, "133", "132")):
-            self.assertEqual([audio, 0], graph[str(base + 1)]["inputs"]["audio"])
-            self.assertEqual([output, 3], graph[str(base + 1)]["inputs"]["vae"])
-            self.assertEqual(0.0, graph[str(base + 2)]["inputs"]["value"])
-            self.assertEqual([str(base + 1), 0], graph[str(base + 3)]["inputs"]["samples"])
-            self.assertEqual([str(base + 2), 0], graph[str(base + 3)]["inputs"]["mask"])
-            self.assertEqual([str(base + 3), 0], graph[str(base + 4)]["inputs"]["audio_latent"])
-
-    def test_digital_human2_failure_is_not_retried_as_digital_human1(self) -> None:
+    def test_retired_selflift_mode_is_rejected(self) -> None:
         runpod = types.ModuleType("runpod")
         network = types.ModuleType("network_bootstrap")
         network.install_transfer_host_mapping = lambda: None
@@ -363,82 +266,51 @@ class LongVideoApiTest(unittest.TestCase):
         storage.upload_outputs = lambda *_args, **_kwargs: None
         audio = types.ModuleType("audio_utils")
         audio._preserve_source_audio = lambda *_args, **_kwargs: None
-        audio._split_avatar_audio = lambda *_args, **_kwargs: None
-        import worker_long.long_video as long_video_module
         with patch.dict(sys.modules, {
             "runpod": runpod, "network_bootstrap": network,
             "object_storage": storage, "audio_utils": audio,
-            "long_video": long_video_module,
         }):
-            from worker_long import handler as worker_handler
-
-            with tempfile.TemporaryDirectory() as temporary:
-                folder = Path(temporary)
-                payload = {
+            from worker_long.handler import _payload
+            with self.assertRaises(ValueError):
+                _payload({
                     "mode": "long_avatar_selflift", "avatar_mode": "audio",
-                    "duration": 8, "source_audio_duration": 8,
-                }
-                prepared = [
-                    {"field": "images", "filename": "person.png", "path": folder / "person.png"},
-                    {"field": "audios", "filename": "voice.wav", "path": folder / "voice.wav"},
-                ]
-                with patch.object(worker_handler, "_payload", return_value=("long_avatar_selflift", payload)), \
-                     patch.object(worker_handler, "_prepare_media", return_value=(folder, prepared)), \
-                     patch.object(worker_handler, "_run_long_single_window", side_effect=RuntimeError("selflift graph failed")) as run_single, \
-                     patch.object(worker_handler, "_run_long_chunked") as run_chunked, \
-                     patch.object(worker_handler, "_report_failure"):
-                    with self.assertRaises(RuntimeError):
-                        worker_handler.handler({
-                            "id": "dh2-isolation-test",
-                            "input": {
-                                "media": [], "source_audio_duration": 8,
-                            },
-                        })
-                run_single.assert_called_once()
-                self.assertEqual("long_avatar_selflift", run_single.call_args.args[0])
-                run_chunked.assert_not_called()
+                    "duration": 8, "segment_prompts": ["old prompt"],
+                })
+    def test_digital_human_workflow_rejects_unknown_id_and_resolution(self) -> None:
+        with self.assertRaises(ValueError):
+            _digital_human_workflow_graph("old", "portrait.png", "voice.wav", 1.0)
+        with self.assertRaises(ValueError):
+            _digital_human_workflow_graph("digital_human_image_audio_v1", "portrait.png", "voice.wav", 0.7)
+        with self.assertRaises(ValueError):
+            _digital_human_workflow_graph("digital_human_image_audio_v1", "portrait.png", "voice.wav", 1.0, "4:3")
 
-    def test_avatar_solattn_can_be_disabled_without_changing_reference_mode(self) -> None:
-        profile = types.SimpleNamespace(
-            fl_model="fl.safetensors", ref_model="ref.safetensors",
-            text_encoder="text.safetensors", video_vae="video.safetensors",
-            audio_vae="audio.safetensors", ref_lora="ref-lora.safetensors",
-        )
-        module = types.ModuleType("h3_profiles")
-        module.get_profile = lambda _name: profile
-        with patch.dict(sys.modules, {"h3_profiles": module}), patch.dict("os.environ", {"H3_SOLATTN": "off"}):
-            graph, _, _ = long_workflow(
-                ["<Picture 1> performs <Audio 1>"], 15, "9:16", 17,
-                avatar_image="person.png", audio_segments=["voice.wav"],
-            )
-        self.assertEqual("reference", graph["101"]["inputs"]["mode"])
-        self.assertNotIn("129", graph)
-        self.assertEqual(["104", 0], graph["105"]["inputs"]["model"])
+    def test_worker_payload_accepts_both_digital_human_ratios_at_fixed_one_mp(self) -> None:
+        runpod = types.ModuleType("runpod")
+        network = types.ModuleType("network_bootstrap")
+        network.install_transfer_host_mapping = lambda: None
+        storage = types.ModuleType("object_storage")
+        storage.upload_outputs = lambda *_args, **_kwargs: None
+        audio = types.ModuleType("audio_utils")
+        audio._preserve_source_audio = lambda *_args, **_kwargs: None
+        with patch.dict(sys.modules, {
+            "runpod": runpod, "network_bootstrap": network,
+            "object_storage": storage, "audio_utils": audio,
+        }):
+            from worker_long.handler import _payload
+            for ratio in ("16:9", "9:16"):
+                mode, payload = _payload({
+                    "mode": "digital_human_workflow",
+                    "workflow_id": "digital_human_image_audio_v1",
+                    "duration": 5,
+                    "ratio": ratio,
+                    "megapixels": 1.0,
+                    "prompt": "原样保留这段附加要求。",
+                })
+                self.assertEqual("digital_human_workflow", mode)
+                self.assertEqual(ratio, payload["ratio"])
+                self.assertEqual(1.0, payload["megapixels"])
+                self.assertEqual("原样保留这段附加要求。", payload["prompt"])
 
-    def test_digital_human_prompts_use_minimax_picture_and_audio_references(self) -> None:
-        prompts = _digital_human_prompts(16, "9:16", "温柔、微笑")
-        self.assertEqual(2, len(prompts))
-        for prompt in prompts:
-            self.assertIn("<Subject 1> 是 <Picture 1> 中的人物", prompt)
-            self.assertNotIn("<Subject 2>", prompt)
-            self.assertIn("口型严格与 <Audio 1> 同步", prompt)
-            self.assertEqual(1, prompt.count("温柔、微笑"))
-            self.assertLess(prompt.index("subject_definitions:"), prompt.index("summary:"))
-            self.assertLess(prompt.index("summary:"), prompt.index("retention_analysis:"))
-            self.assertLess(prompt.index("retention_analysis:"), prompt.index("detailed_description:"))
-            self.assertLess(prompt.index("detailed_description:"), prompt.index("overall_soundscape:"))
-            self.assertLess(prompt.index("overall_soundscape:"), prompt.index("non_diegetic_music:"))
-        self.assertEqual(prompts[0], prompts[1])
-        self.assertEqual(prompts, _digital_human_prompts(16, "16:9", "温柔、微笑"))
-        self.assertNotIn("segment", prompts[1])
-
-    def test_blank_digital_human_direction_adds_no_style_or_camera_defaults(self) -> None:
-        prompt = _digital_human_prompts(8, "9:16")[0]
-        self.assertIn("subject_definitions:", prompt)
-        self.assertIn("口型严格与 <Audio 1> 同步", prompt)
-        self.assertNotIn("direct-to-camera", prompt)
-        self.assertNotIn("subtle breathing", prompt)
-        self.assertNotIn("User instructions", prompt)
 
 
 if __name__ == "__main__":

@@ -360,12 +360,14 @@ async def create_job(
         ),
     })
 
-    # Standard 720p/1080p/2K images must use the same Tencent direct-upload
-    # handler as the long-video image.  Without the overlay, older standard
-    # images fall back to the public edge for large MP4 uploads and can hit
-    # Cloudflare 502/524 timeouts.  Long-video jobs already provide their own
-    # start script, so only add this to jobs that do not have one.
-    if start_script is None and transfer_backend == "local":
+    # Standard 720p/1080p/2K images may need the Tencent direct-upload handler
+    # overlay. Digital-human has its own fully baked image and must never fetch
+    # a runtime bundle; ordinary long-video jobs provide their own start script.
+    if (
+        start_script is None
+        and transfer_backend == "local"
+        and worker_input.get("mode") != "digital_human_workflow"
+    ):
         overlay_key = os.getenv("GONGJI_STANDARD_OVERLAY_KEY", "h3-long-worker.tar.gz").strip()
         if overlay_key and os.path.isfile(os.getenv("H3_LOCAL_RUNTIME_OVERLAY_PATH", "")):
             env.append({
@@ -549,25 +551,28 @@ async def create_long_job(
     transfer_backend: str = "cos",
 ) -> int:
     """Submit the isolated latent-linked long-video worker."""
-    image = os.getenv("GONGJI_LONG_IMAGE", "").strip()
+    is_digital_human = worker_input.get("mode") == "digital_human_workflow"
+    image = (
+        os.getenv("GONGJI_DIGITAL_HUMAN_IMAGE", "").strip()
+        if is_digital_human
+        else ""
+    ) or os.getenv("GONGJI_LONG_IMAGE", "").strip()
     if not image:
         raise GongjiError("长视频共绩镜像尚未配置")
     timeout = int(os.getenv("GONGJI_LONG_TIMEOUT_SEC", "7200"))
     estimated = int(os.getenv("GONGJI_LONG_ESTIMATED_SEC", "1800"))
-    overlay_key = os.getenv("GONGJI_LONG_OVERLAY_KEY", "").strip()
-    if not overlay_key:
+    # Digital-human code and its pinned workflow are baked into its dedicated
+    # worker image. Keep the runtime overlay path only for ordinary long video.
+    overlay_key = "" if is_digital_human else os.getenv("GONGJI_LONG_OVERLAY_KEY", "").strip()
+    if not is_digital_human and not overlay_key:
         raise GongjiError("长视频共绩运行包尚未配置")
-    return await create_job(
-        job_id,
-        merchant_id,
-        worker_input,
-        "720p",
-        transfer_backend,
-        service_image=image,
-        task_prefix="h3-long",
-        timeout_sec=timeout,
-        estimated_sec=estimated,
-        start_script={
+    start_script = None
+    extra_env = [{
+        "name": "H3_LONG_MAX_DURATION_SECONDS",
+        "value": os.getenv("H3_LONG_MAX_DURATION_SECONDS", "45"),
+    }]
+    if overlay_key:
+        start_script = {
             "command": ["/bin/bash"],
             "args": [
                 "-c",
@@ -581,20 +586,27 @@ async def create_long_job(
                     "exec /app/entrypoint.sh"
                 ),
             ],
-        },
-        extra_env=[
-            {
-                "name": "H3_LONG_OVERLAY_URL",
-                "value": _runtime_bundle_url(
-                    job_id, overlay_key, timeout + 1800,
-                    backend_name=transfer_backend,
-                ),
-            },
-            {
-                "name": "H3_LONG_MAX_DURATION_SECONDS",
-                "value": os.getenv("H3_LONG_MAX_DURATION_SECONDS", "45"),
-            },
-        ],
+        }
+        extra_env.append({
+            "name": "H3_LONG_OVERLAY_URL",
+            "value": _runtime_bundle_url(
+                job_id, overlay_key, timeout + 1800,
+                env_name="H3_LOCAL_RUNTIME_OVERLAY_PATH",
+                backend_name=transfer_backend,
+            ),
+        })
+    return await create_job(
+        job_id,
+        merchant_id,
+        worker_input,
+        "720p",
+        transfer_backend,
+        service_image=image,
+        task_prefix="h3-long",
+        timeout_sec=timeout,
+        estimated_sec=estimated,
+        start_script=start_script,
+        extra_env=extra_env,
     )
 
 

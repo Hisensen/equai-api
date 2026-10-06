@@ -15,7 +15,7 @@ import httpx
 import runpod
 from network_bootstrap import install_transfer_host_mapping
 from object_storage import upload_outputs
-from audio_utils import _preserve_source_audio, _split_avatar_audio
+from audio_utils import _preserve_source_audio
 
 install_transfer_host_mapping()
 
@@ -43,11 +43,7 @@ ROUTES = {
     "latent_refine": "/api/generate/latent-refine",
     "long_text": "/api/generate/long",
     "long_image": "/api/generate/long",
-    "long_avatar": "/api/generate/long",
-    # Keep Digital-human 2 on its own internal endpoint.  The endpoint still
-    # shares request validation with long-video, but its graph is forced to the
-    # selflift-Avatar sampler and is never routed through Digital-human 1.
-    "long_avatar_selflift": "/api/generate/long-avatar2",
+    "digital_human_workflow": "/api/generate/digital-human-workflow",
 }
 
 
@@ -263,12 +259,8 @@ def _free_comfy_memory() -> None:
 def _submit_long_chunk(
     prompts: list[str], lengths: list[int], ratio: str, seed: int,
     segment_offset: int, latents: dict[str, Path], media: list[dict],
-    avatar: bool = False, selflift: bool = False,
 ) -> str:
-    # The avatar chunk endpoint expects exactly one image and one audio part.
-    # Use a mapping for that one-to-one request; repeated multipart fields are
-    # only needed by the batched text workflow.
-    files = {} if avatar else []
+    files = []
     opened = []
     try:
         for item in media:
@@ -279,34 +271,22 @@ def _submit_long_chunk(
                 mimetypes.guess_type(item["filename"])[0]
                 or "application/octet-stream",
             )
-            if avatar:
-                files[item["field"]] = value
-            else:
-                files.append((item["field"], value))
+            files.append((item["field"], value))
         for role in ("video", "audio"):
             path = latents.get(role)
             if path is not None:
                 handle = path.open("rb")
                 opened.append(handle)
                 value = (path.name, handle, "application/octet-stream")
-                if avatar:
-                    files[f"{role}_latent"] = value
-                else:
-                    files.append((f"{role}_latent", value))
-        route = (
-            "/api/generate/long-avatar2-chunk" if selflift
-            else "/api/generate/long-avatar-chunk" if avatar
-            else "/api/generate/long-chunk"
-        )
+                files.append((f"{role}_latent", value))
         response = httpx.post(
-            INTERNAL_API + route,
+            INTERNAL_API + "/api/generate/long-chunk",
             data={
                 "prompts_json": json.dumps(prompts, ensure_ascii=False),
                 "lengths_json": json.dumps(lengths),
                 "ratio": ratio,
                 "seed": seed,
                 "segment_offset": segment_offset,
-                "selflift": "1" if selflift else "0",
             },
             files=files,
             timeout=300,
@@ -583,21 +563,11 @@ def _finalize_long_output(paths: list[Path], duration: float, folder: Path) -> P
 def _run_long_chunked(
     payload: dict, folder: Path, media: list[dict]
 ) -> tuple[str, list[Path]]:
-    """Render linked segments in memory-bounded Comfy graphs.
-
-    Avatar/reference graphs keep the H3 Easy context, decoded video and decoded
-    audio for every segment alive until the final mux.  That is safe for a
-    single 15-second window, but a 27–30 second speech job can exhaust the
-    48-GiB worker after the first segment and Gongji only reports the generic
-    container reason ``Error``.  Keep one avatar segment per graph so the
-    latent handoff is the only state that crosses the graph boundary.  Text
-    long-video graphs retain the existing three-segment batching.
-    """
-    from long_video import avatar_segment_lengths, segment_lengths
+    """Render linked text/image segments in memory-bounded Comfy graphs."""
+    from long_video import segment_lengths
 
     prompts = json.loads(payload["prompts_json"])
-    length_fn = avatar_segment_lengths if payload["mode"] in {"long_avatar", "long_avatar_selflift"} else segment_lengths
-    lengths, _ = length_fn(float(payload["duration"]))
+    lengths, _ = segment_lengths(float(payload["duration"]))
     if len(prompts) != len(lengths):
         raise ValueError(
             f"长视频提示词数量 {len(prompts)} 与帧计划 {len(lengths)} 不一致"
@@ -606,24 +576,16 @@ def _run_long_chunked(
     latent_files: set[Path] = set()
     previous_latents: dict[str, Path] = {}
     prompt_id = ""
-    chunk_size = 1 if payload["mode"] in {"long_avatar", "long_avatar_selflift"} else 3
+    chunk_size = 3
     try:
         for offset in range(0, len(prompts), chunk_size):
             if offset:
                 _free_comfy_memory()
-            if payload["mode"] in {"long_avatar", "long_avatar_selflift"}:
-                image_item = next(item for item in media if item["field"] == "images")
-                audio_items = [item for item in media if item["field"] == "audios"]
-                chunk_media = [image_item] + audio_items[offset:offset + 3]
-                avatar_chunk = True
-            else:
-                chunk_media = media if offset == 0 else []
-                avatar_chunk = False
+            chunk_media = media if offset == 0 else []
             prompt_id = _submit_long_chunk(
                 prompts[offset:offset + chunk_size], lengths[offset:offset + chunk_size],
                 str(payload["ratio"]), int(payload["seed"]), offset,
-                previous_latents, chunk_media, avatar=avatar_chunk,
-                selflift=payload["mode"] == "long_avatar_selflift",
+                previous_latents, chunk_media,
             )
             outputs, previous_latents = _wait_result(prompt_id)
             if len(outputs) != 1 or set(previous_latents) != {"video", "audio"}:
@@ -662,17 +624,38 @@ def _payload(value: dict) -> tuple[str, dict]:
         raise ValueError(
             "mode 必须是 text、image、reference、text_latent_hd、"
             "image_latent_hd、reference_latent_hd、enhance、rtx_only、"
-            "long_text、long_image、long_avatar 或 long_avatar_selflift"
-    )
-    if mode in {"long_text", "long_image", "long_avatar", "long_avatar_selflift"}:
+            "long_text、long_image 或 digital_human_workflow"
+        )
+    if mode == "digital_human_workflow":
+        workflow_id = str(value.get("workflow_id") or "")
+        duration = float(value.get("duration") or 0)
+        ratio = str(value.get("ratio") or "16:9")
+        megapixels = float(value.get("megapixels") or 1.0)
+        if workflow_id != "digital_human_image_audio_v1":
+            raise ValueError("数字人工作流标识无效")
+        if not 1 <= duration <= float(os.getenv("H3_LONG_MAX_DURATION_SECONDS", "60")):
+            raise ValueError("数字人音频时长超出安全范围")
+        if ratio not in {"16:9", "9:16"} or megapixels != 1.0:
+            raise ValueError("数字人画幅仅支持 16:9 或 9:16，清晰度固定为 1M")
+        prompt = value.get("prompt") or ""
+        if not isinstance(prompt, str) or len(prompt) > 40000:
+            raise ValueError("数字人 H3 提示词格式无效或过长")
+        return mode, {
+            "mode": mode,
+            "workflow_id": workflow_id,
+            "duration": duration,
+            "ratio": ratio,
+            "megapixels": megapixels,
+            "prompt": prompt,
+        }
+    if mode in {"long_text", "long_image"}:
         prompts = value.get("segment_prompts")
         if not isinstance(prompts, list) or not all(isinstance(item, str) for item in prompts):
             raise ValueError("segment_prompts 必须是字符串列表")
-        avatar_mode = str(value.get("avatar_mode") or "")
-        if len(prompts) < (1 if mode in {"long_avatar", "long_avatar_selflift"} and avatar_mode == "audio" else 2) or any(not item.strip() for item in prompts):
+        if len(prompts) < 2 or any(not item.strip() for item in prompts):
             raise ValueError("长视频分段提示词数量或内容无效")
         duration = float(value.get("duration") or 0)
-        minimum = 1 if mode in {"long_avatar", "long_avatar_selflift"} and avatar_mode == "audio" else 16
+        minimum = 16
         if not minimum <= duration <= int(os.getenv("H3_LONG_MAX_DURATION_SECONDS", "60")):
             raise ValueError("长视频时长超出安全范围")
         ratio = str(value.get("ratio") or "16:9")
@@ -684,8 +667,6 @@ def _payload(value: dict) -> tuple[str, dict]:
             "duration": duration,
             "ratio": ratio,
             "seed": int(value.get("seed") or 0),
-            "avatar_mode": avatar_mode,
-            "selflift": "1" if mode == "long_avatar_selflift" else "0",
         }
     prompt = str(value.get("prompt") or "").strip()
     if not prompt:
@@ -729,58 +710,27 @@ def handler(job: dict) -> dict:
             if mode == "long_image" and fields != ["first_frame"]:
                 raise ValueError("图生长视频必须且只能提供一个 first_frame")
             source_audio = None
-            if mode in {"long_avatar", "long_avatar_selflift"}:
-                avatar_mode = payload.get("avatar_mode")
-                if avatar_mode != "audio" or fields != ["images", "audios"]:
-                    raise ValueError("数字人只支持一张人物图和一段原始音频驱动")
-                if len([item for item in prepared if item["field"] == "images"]) != 1 or len([item for item in prepared if item["field"] == "audios"]) != 1:
-                    raise ValueError("数字人素材数量不正确")
-                from long_video import avatar_segment_lengths
-                source_audio = next(item["path"] for item in prepared if item["field"] == "audios")
-                lengths = avatar_segment_lengths(payload["duration"])[0]
-                source_duration = float(value.get("source_audio_duration") or 0)
-                # A single segment with no meaningful tail can use the upload
-                # directly, just like the proven 15-second reference endpoint.
-                if len(lengths) == 1 and abs(source_duration - payload["duration"]) <= 0.1:
-                    audio_parts = [source_audio]
-                else:
-                    audio_parts = _split_avatar_audio(
-                        source_audio, lengths, folder,
-                        target_duration=float(payload["duration"]),
-                    )
-                image_item = next(item for item in prepared if item["field"] == "images")
-                prepared = [image_item] + [
-                    {"field": "audios", "filename": path.name, "path": path}
-                    for path in audio_parts
-                ]
+            if mode == "digital_human_workflow":
+                image_items = [item for item in prepared if item["field"] == "images"]
+                audio_items = [item for item in prepared if item["field"] == "audios"]
+                if fields != ["images", "audios"] or len(image_items) != 1 or len(audio_items) != 1:
+                    raise ValueError("数字人工作流需要一张人物图和一段原始音频")
+                source_audio = audio_items[0]["path"]
         except Exception as exc:
             raise RuntimeError(f"stage=input_prepare: {type(exc).__name__}: {exc}") from exc
         try:
             tier = str(value.get("tier") or "1080p")
-            if mode in {"long_text", "long_image", "long_avatar", "long_avatar_selflift"}:
-                # A multi-window digital-human render is intentionally split
-                # into one H3 graph per segment.  Keeping both avatar windows
-                # in one graph is the source of the provider's opaque GPU
-                # ``Error`` on ~28-second speech jobs.
-                from long_video import avatar_segment_lengths
-                avatar_multi_window = (
-                    mode in {"long_avatar", "long_avatar_selflift"}
-                    and len(avatar_segment_lengths(float(payload["duration"]))[0]) > 1
-                )
-                if float(payload["duration"]) <= 45 and not avatar_multi_window:
-                    # Digital-human 2 is intentionally selflift-Avatar only.
-                    # Do not fall back to the native H3 avatar sampler: that
-                    # would make the two user-facing tools indistinguishable
-                    # and could report a successful DH2 task that never used
-                    # the selflift-Avatar node.
+            if mode == "digital_human_workflow":
+                prompt_id = _submit(mode, payload, prepared)
+                outputs = _wait(prompt_id)
+                if len(outputs) != 1:
+                    raise RuntimeError("数字人工作流必须返回一个视频")
+            elif mode in {"long_text", "long_image"}:
+                if float(payload["duration"]) <= 45:
                     prompt_id, outputs = _run_long_single_window(
                         mode, payload, folder, prepared
                     )
                 else:
-                    # The same isolation rule applies to linked segments.
-                    # A SelfLift failure propagates to the task finalizer,
-                    # which refunds the reserved points; it is never retried
-                    # through Digital-human 1.
                     prompt_id, outputs = _run_long_chunked(
                         payload, folder, prepared
                     )
@@ -801,7 +751,7 @@ def handler(job: dict) -> dict:
                 outputs = _wait(prompt_id)
             except Exception as exc:
                 raise RuntimeError(f"stage=generation: {type(exc).__name__}: {exc}") from exc
-        if mode in {"long_avatar", "long_avatar_selflift"} and source_audio is not None:
+        if mode == "digital_human_workflow" and source_audio is not None:
             try:
                 outputs = [_preserve_source_audio(outputs[0], source_audio, payload["duration"])]
             except Exception as exc:

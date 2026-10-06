@@ -166,9 +166,37 @@ non_diegetic_music:
 N/A"""
 
 
+DIGITAL_HUMAN_H3_SELF_LIFT_TEMPLATE = """subject_definitions:
+<Subject 1> is the person and the complete visible setting shown together in <Picture 1>. Preserve the person's identity, face, hair, clothing, pose, proportions, background, objects, colors, lighting, and composition visible in the same image.
+<Audio 1> is the supplied speech-audio window for <Subject 1> (S1); reuse it as the exact synchronized speech and voice source for the current window.
+
+summary:
+[reference generation + audio reuse + latent continuation] Create one continuous talking-head video of <Subject 1> from the single reference image <Picture 1>. Reuse each supplied <Audio 1> window in sequence as the synchronized speech source. Continue the same shot seamlessly from the preceding H3 latent tail; keep the same person, framing, camera, and background for the whole video.
+
+retention_analysis:
+<Subject 1> (entire video): preserve the person's identity, appearance, clothing, background, objects, lighting, colors, and spatial arrangement from <Picture 1> throughout every continuation window.
+<Audio 1> (each window): reuse the supplied speech waveform and timing exactly; preserve the original language and voice, with accurate mouth synchronization. Do not add, remove, translate, or replace words.
+
+detailed_description:
+[Shot 1] One uninterrupted, locked medium shot matching <Picture 1>. <Subject 1> (S1) faces the camera and speaks in synchronization with the current <Audio 1> window. Continue naturally from the preceding latent tail when one is present. Keep the face identity, mouth shape, head position, clothing, lighting, camera framing, and original background consistent across the window boundary. Use only subtle natural blinking, breathing, and restrained head movement. Do not cut, zoom, pan, change location, introduce people or objects, or add captions. Preserve the source audio's original language, voice, and timing.
+
+overall_soundscape:
+Use the supplied <Audio 1> window as the only sound. Add no sound effects or ambience.
+
+non_diegetic_music:
+N/A"""
+
+
 def digital_human_h3_prompt(direction: str = "") -> str:
     extra = direction.strip()
     return DIGITAL_HUMAN_H3_TEMPLATE.format(direction=f" {extra}" if extra else "")
+
+
+def digital_human_h3_self_lift_prompt(direction: str = "") -> str:
+    extra = direction.strip()
+    if not extra:
+        return DIGITAL_HUMAN_H3_SELF_LIFT_TEMPLATE
+    return DIGITAL_HUMAN_H3_SELF_LIFT_TEMPLATE + "\n\nuser_direction:\n" + extra
 
 
 MODE_TEMPLATES = {

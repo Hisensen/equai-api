@@ -45,6 +45,21 @@ class FakeClient:
         return httpx.Response(200, json={"code": "0000", "data": data})
 
 
+class FakeCreateClient:
+    def __init__(self):
+        self.payload = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return None
+
+    async def post(self, _url, **kwargs):
+        self.payload = kwargs["json"]
+        return httpx.Response(200, json={"code": "0000", "data": {"task_id": 321}})
+
+
 class GongjiStatusTest(unittest.TestCase):
     def test_gpu_media_uses_tls_valid_direct_origin(self) -> None:
         import gongji
@@ -66,6 +81,75 @@ class GongjiStatusTest(unittest.TestCase):
         self.assertEqual(direct["media"][1], original["media"][1])
         self.assertEqual(untouched, original)
         self.assertEqual(original["media"][0]["url"].split("/")[2], "equai.vip")
+
+    def test_digital_human_uses_baked_image_without_runtime_download(self) -> None:
+        import gongji
+
+        async def check(mode: str) -> tuple:
+            with (
+                patch.dict(os.environ, {
+                    "GONGJI_DIGITAL_HUMAN_IMAGE": "digital-human-image",
+                    "GONGJI_DIGITAL_HUMAN_OVERLAY_KEY": "digital-human-worker.tar.gz",
+                    "GONGJI_LONG_IMAGE": "existing-long-image",
+                    "GONGJI_LONG_OVERLAY_KEY": "h3-long-worker.tar.gz",
+                }),
+                patch.object(gongji, "_runtime_bundle_url", return_value="https://runtime.test/bundle") as runtime_bundle_url,
+                patch.object(gongji, "create_job", new_callable=AsyncMock, return_value=42) as create_job,
+            ):
+                result = await gongji.create_long_job(
+                    "test-job", "test-merchant", {"mode": mode}, "local"
+                )
+            self.assertEqual(result, 42)
+            return (
+                create_job.await_args.kwargs["service_image"],
+                runtime_bundle_url.call_count,
+                create_job.await_args.kwargs.get("start_script"),
+                create_job.await_args.kwargs["extra_env"],
+            )
+
+        self.assertEqual(
+            asyncio.run(check("digital_human_workflow")),
+            (
+                "digital-human-image", 0, None,
+                [{"name": "H3_LONG_MAX_DURATION_SECONDS", "value": "45"}],
+            ),
+        )
+        long_video = asyncio.run(check("long_text"))
+        self.assertEqual(long_video[0:2], ("existing-long-image", 1))
+        self.assertIn("H3_LONG_OVERLAY_URL", long_video[3][1]["name"])
+        self.assertEqual(long_video[3][1]["value"], "https://runtime.test/bundle")
+        self.assertEqual(long_video[2]["command"], ["/bin/bash"])
+
+    def test_digital_human_skips_automatic_standard_overlay(self) -> None:
+        import gongji
+
+        client = FakeCreateClient()
+        with (
+            patch.object(gongji, "TOKEN", "test-token"),
+            patch.object(gongji, "_resource", new_callable=AsyncMock, return_value={"resource": {}, "mark": "mark"}),
+            patch.object(gongji, "_output_upload_targets", return_value=[]),
+            patch.object(gongji, "_result_upload_target", return_value={"key": "_job_result.json", "url": "https://upload.invalid"}),
+            patch.object(gongji.httpx, "AsyncClient", return_value=client),
+            patch.object(gongji.os.path, "isfile", return_value=True),
+            patch.dict(os.environ, {
+                "GONGJI_720_IMAGE": "standard-image",
+                "GONGJI_720_STORAGE_ID": "2593",
+                "GONGJI_STANDARD_OVERLAY_KEY": "standard-worker.tar.gz",
+                "H3_LOCAL_RUNTIME_OVERLAY_PATH": "/data/runtime/h3-worker.tar.gz",
+            }),
+        ):
+            result = asyncio.run(gongji.create_job(
+                "dh-job", "merchant", {"mode": "digital_human_workflow"}, "720p", "local",
+                service_image="baked-dh-image",
+            ))
+
+        service = client.payload["services"][0]
+        env_names = {item["name"] for item in service["env"]}
+        self.assertEqual(result, 321)
+        self.assertEqual(service["service_image"], "baked-dh-image")
+        self.assertNotIn("start_script", service)
+        self.assertNotIn("H3_STANDARD_OVERLAY_URL", env_names)
+        self.assertNotIn("H3_LONG_OVERLAY_URL", env_names)
 
     def status(
         self, job_state: str, node_status: str = "End", reason=None,

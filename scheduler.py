@@ -643,7 +643,7 @@ async def _dispatch_once(queue: str = "standard") -> bool:
     try:
         worker_input = _worker_input(row)
         video_submitted = time.time()
-        if worker_input.get("mode") in {"long_text", "long_avatar", "long_avatar_selflift"}:
+        if worker_input.get("mode") in {"long_text", "digital_human_workflow"}:
             task_id = await gongji.create_long_job(
                 row["id"], row["merchant_id"], worker_input,
                 _transfer_backend(row),
@@ -842,6 +842,9 @@ async def _complete_locked(row, info: dict) -> bool:
                 db, row["id"], status="completed",
                 result={"artifacts": artifacts, "metrics": (completed_payload.get("_remix") or {}).get("metrics", {})},
             )
+    if not is_music:
+        from media_preview import warm_task_previews
+        asyncio.create_task(warm_task_previews(row["merchant_id"], row["id"], artifacts))
     if backend == "cos" and local_outputs_enabled():
         try:
             await asyncio.to_thread(delete_keys, [item["key"] for item in objects])
@@ -1072,7 +1075,7 @@ async def _cleanup_once() -> int:
     now = time.time()
     with connect() as db:
         rows = db.execute(
-            """SELECT id,bucket,object_key FROM assets
+            """SELECT id,merchant_id,task_id,role,bucket,object_key FROM assets
             WHERE expires_at IS NOT NULL AND expires_at<=? AND purged_at IS NULL LIMIT 500""",
             (now,),
         ).fetchall()
@@ -1088,6 +1091,10 @@ async def _cleanup_once() -> int:
         await asyncio.to_thread(remove_local_input, row["object_key"])
     for row in local_result_rows:
         await asyncio.to_thread(remove_local_result, row["object_key"])
+    if rows:
+        from media_preview import remove_task_previews
+        for merchant_id, task_id in {(row["merchant_id"], row["task_id"]) for row in rows if row["role"] == "output"}:
+            await asyncio.to_thread(remove_task_previews, merchant_id, task_id)
     with connect() as db:
         if rows:
             db.executemany("UPDATE assets SET purged_at=? WHERE id=?", [(now, row["id"]) for row in rows])
