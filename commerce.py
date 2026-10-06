@@ -1395,8 +1395,15 @@ async def poll_image(row: dict) -> None:
                 image.convert("RGBA" if "A" in image.getbands() else "RGB").save(output, format="PNG")
             artifact = await asyncio.to_thread(store_output, row, output, "image")
         now, expiry = time.time(), time.time() + 72 * 3600
+        # The image service settles in CNY on its own task record. Nothing else
+        # reads it, so every image edit used to land in the admin cost report at
+        # zero -- 24 of 24 completed edits, while GPU work was accounted for.
+        try:
+            billing = float(((value.get("billing") or {}).get("amount")) or 0)
+        except (TypeError, ValueError):
+            billing = 0.0
         with transaction() as db:
-            changed = db.execute("UPDATE merchant_tasks SET status='completed',progress=100,message='图片编辑完成',artifacts=?,finished_at=?,input_expires_at=?,output_expires_at=? WHERE id=? AND status='running'", (json.dumps([artifact]), now, now + 86400, expiry, row["id"]))
+            changed = db.execute("UPDATE merchant_tasks SET status='completed',progress=100,message='图片编辑完成',artifacts=?,provider_billing=?,finished_at=?,input_expires_at=?,output_expires_at=? WHERE id=? AND status='running'", (json.dumps([artifact]), billing, now, now + 86400, expiry, row["id"]))
             if not changed.rowcount:
                 return
             db.execute("UPDATE assets SET expires_at=? WHERE task_id=? AND role='input'", (now + 86400, row["id"]))
