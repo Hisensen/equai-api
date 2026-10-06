@@ -833,10 +833,22 @@ def finalize_remix(row: dict, artifacts: list[dict]) -> list[dict]:
 async def create_image_edit(request: Request, merchant: Annotated[dict, Depends(video_merchant)],
                             prompt: Annotated[str, Form()], images: Annotated[list[UploadFile] | None, File()] = None,
                             note: Annotated[str, Form()] = "",
+                            direct_assets: Annotated[str, Form()] = "",
                             idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None) -> dict:
-    from video_api import _upload, _remove_uploaded_inputs, _get_task, _task_view
+    from video_api import (_upload, _remove_uploaded_inputs, _get_task, _task_view,
+                           direct_assets_as_uploads, _uploads_named)
 
     images = images or []
+    if direct_assets:
+        # Browser-staged pictures: four 30 MB images cannot survive the Hong Kong
+        # proxy's 60-second ceiling as one multipart POST, so they are uploaded
+        # straight to this host first and handed here as ordinary UploadFile.
+        if images:
+            raise HTTPException(422, "直传素材不能与 multipart 素材混用")
+        _staged_objects, staged = await direct_assets_as_uploads(
+            merchant["id"], "reference", direct_assets,
+        )
+        images = _uploads_named(staged, "images")
     settings = image_settings()
     if not settings["key"] or settings["price"] <= 0:
         raise HTTPException(503, "图片编辑正在配置中，暂未开放提交")

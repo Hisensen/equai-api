@@ -463,7 +463,7 @@
       roles.push(input.dataset.commerceRole); form.append("images", input.files[0]);
     }
     form.append("remix_roles", JSON.stringify(roles));
-    submit(event.currentTarget, form, "/api/account/commerce-remix/720p", $("#commerceRemixError"));
+    submit(event.currentTarget, form, "/api/account/commerce-remix/720p", $("#commerceRemixError"), true);
   });
   $("#digitalHumanForm").addEventListener("submit", event => {
     event.preventDefault();
@@ -473,10 +473,13 @@
     if (!image || image.size > 30 * 1024 ** 2) { $("#digitalHumanError").textContent = "请上传 30 MB 以内的一张人物图"; return; }
     if (!digitalHumanAvailable) { $("#digitalHumanError").textContent = "长视频 GPU 服务暂不可用，请稍后再试。"; return; }
     if (!audio || audio.size > 300 * 1024 ** 2) { $("#digitalHumanError").textContent = "请上传 300 MB 以内的音频文件"; return; }
-    form.append("mode", "audio"); form.append("image", image); form.append("audio", audio);
+    // images/audios are the names the staging grant understands; the endpoint
+    // accepts both spellings so the multipart fallback still works.
+    form.append("kind", "reference"); form.append("mode", "audio");
+    form.append("images", image); form.append("audios", audio);
     form.append("ratio", $("#digitalHumanRatio").value);
     form.append("prompt", $("#digitalHumanPrompt").value);
-    submit(event.currentTarget, form, "/api/account/digital-human/720p", $("#digitalHumanError"));
+    submit(event.currentTarget, form, "/api/account/digital-human/720p", $("#digitalHumanError"), true);
   });
   $("#imageEditForm").addEventListener("submit", async event => {
     event.preventDefault(); const files = editingFiles(), form = new FormData();
@@ -487,7 +490,10 @@
     button.disabled = false; button.textContent = label;
     for (const file of prepared) form.append("images", file);
     form.append("prompt", $("#editPrompt").value);
-    await submit(event.currentTarget, form, "/api/account/image-edits", $("#imageEditError"));
+    // kind only tells the staging grant which media vocabulary to use; the
+    // endpoint itself ignores it.
+    form.append("kind", "reference");
+    await submit(event.currentTarget, form, "/api/account/image-edits", $("#imageEditError"), true);
   });
   $("#editorForm")?.addEventListener("submit", event => {
     event.preventDefault(); const form = new FormData(), file = $("#editorVideo").files[0], selected = [...$("#editorImages").files];

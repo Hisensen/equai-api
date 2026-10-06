@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -28,6 +29,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
 
 import gongji
 import reference_image
@@ -51,6 +53,7 @@ from object_storage import (
     bucket_name,
     create_upload_grant,
     delete_keys,
+    download_path,
     object_metadata,
     presigned_url,
     read_prefix,
@@ -464,6 +467,72 @@ async def _validated_direct_assets(merchant_id: str, kind: str, raw: str) -> lis
     return list(await asyncio.gather(*(validate_one(item) for item in values)))
 
 
+async def direct_assets_as_uploads(
+    merchant_id: str, kind: str, raw: str, *, rename: dict[str, str] | None = None,
+) -> tuple[list[dict], list[UploadFile]]:
+    """Validate browser-staged assets and expose them as UploadFile.
+
+    Direct upload exists because a multipart POST to equai.vip crosses the Hong
+    Kong proxy at ~0.2 MB/s and dies on its 60-second ceiling: a single 11 MB
+    image already fails. The staged bytes are already on this host, so handing
+    the endpoints an UploadFile over the local file lets every existing
+    validator keep working while nothing travels twice.
+
+    ``rename`` maps an endpoint's own field name onto the one the grant uses
+    (digital human posts ``image``/``audio``; grants speak ``images``/``audios``).
+    """
+    objects = await _validated_direct_assets(merchant_id, kind, raw)
+    back = {value: key for key, value in (rename or {}).items()}
+    uploads: list[UploadFile] = []
+    for item in objects:
+        if item.get("storage") == "local":
+            handle = browser_upload_path(str(item["key"])).open("rb")
+        else:
+            # COS fallback: production stages to this host's disk, so this path
+            # only runs if the transfer backend is switched back to object storage.
+            staged = Path(tempfile.mkdtemp(prefix="direct-")) / "asset"
+            await asyncio.to_thread(download_path, str(item["key"]), staged)
+            handle = staged.open("rb")
+        upload = UploadFile(
+            file=handle, size=int(item.get("size_bytes") or 0),
+            filename=str(item.get("filename") or "asset"),
+            headers=Headers({"content-type": str(item.get("content_type") or "application/octet-stream")}),
+        )
+        upload.field = back.get(str(item["field"]), str(item["field"]))  # type: ignore[attr-defined]
+        uploads.append(upload)
+    return objects, uploads
+
+
+async def restage_normalized(objects: list[dict], uploads: list[UploadFile]) -> None:
+    """Persist validator rewrites back onto the staged asset.
+
+    Several validators re-encode images in place (normalize_upload swaps
+    upload.file, size and filename). For a multipart request that rewritten
+    buffer is what gets stored; for a staged asset the bytes already sit on
+    disk, so the rewrite has to be written back or the task would run on the
+    original file while the record describes the normalised one.
+    """
+    for item, upload in zip(objects, uploads):
+        upload.file.seek(0)
+        data = upload.file.read()
+        upload.file.seek(0)
+        if int(item.get("size_bytes") or 0) == len(data) and item.get("filename") == upload.filename:
+            continue
+        if item.get("storage") == "local":
+            await asyncio.to_thread(browser_upload_path(str(item["key"])).write_bytes, data)
+        else:
+            await asyncio.to_thread(
+                upload_fileobj, io.BytesIO(data), str(item["key"]),
+                str(item.get("content_type") or "application/octet-stream"),
+            )
+        item["size_bytes"] = len(data)
+        item["filename"] = Path(upload.filename or item["filename"]).name[:180]
+
+
+def _uploads_named(uploads: list[UploadFile], field: str) -> list[UploadFile]:
+    return [item for item in uploads if getattr(item, "field", "") == field]
+
+
 def _validate_video_audio_flags(kind: str, fields: list[str], value: str) -> str:
     value = value.strip()
     if not value:
@@ -632,11 +701,18 @@ async def create_digital_human(
     request: Request,
     merchant: Annotated[dict, Depends(video_merchant)],
     mode: Annotated[str, Form()],
-    image: Annotated[UploadFile, File()],
+    # Optional so a direct_assets request carries no file parts at all; the
+    # pair is required either way and checked below.
+    image: Annotated[UploadFile | None, File()] = None,
     audio: Annotated[UploadFile | None, File()] = None,
+    # The staged-upload grant speaks the shared media vocabulary (images/audios),
+    # so the form uses those names and falls back to multipart with them intact.
+    images: Annotated[list[UploadFile] | None, File()] = None,
+    audios: Annotated[list[UploadFile] | None, File()] = None,
     ratio: Annotated[str, Form()] = "16:9",
     prompt: Annotated[str, Form()] = "",
     title: Annotated[str, Form()] = "数字人",
+    direct_assets: Annotated[str, Form()] = "",
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict:
     from long_video_api import (
@@ -645,6 +721,26 @@ async def create_digital_human(
     )
 
     mode, ratio = mode.strip().lower(), ratio.strip()
+    if image is None and images:
+        image = images[0]
+    if audio is None and audios:
+        audio = audios[0]
+    if (images and len(images) > 1) or (audios and len(audios) > 1):
+        raise HTTPException(422, "数字人只接受一张人物图和一段音频")
+    if direct_assets:
+        # An audio track may be 300 MB. Through the Hong Kong proxy that is
+        # eleven minutes at best and dies on its 60-second ceiling long before
+        # then, so the browser stages both files on this host first.
+        if (image is not None and image.filename) or (audio is not None and audio.filename):
+            raise HTTPException(422, "直传素材不能与 multipart 素材混用")
+        _staged, staged = await direct_assets_as_uploads(
+            merchant["id"], "reference", direct_assets,
+            rename={"image": "images", "audio": "audios"},
+        )
+        pictures, voices = _uploads_named(staged, "image"), _uploads_named(staged, "audio")
+        if len(pictures) != 1 or len(voices) != 1:
+            raise HTTPException(422, "数字人需要一张人物图和一段音频")
+        image, audio = pictures[0], voices[0]
     from digital_human_prompt import compose_digital_human_workflow_prompt
 
     direction = prompt.strip()
@@ -658,7 +754,9 @@ async def create_digital_human(
         raise HTTPException(422, "数字人目前仅支持上传音频驱动")
     if ratio not in {"16:9", "9:16"}:
         raise HTTPException(422, "数字人画幅只能是 16:9 或 9:16")
-    if not image.filename or Path(image.filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"} or (image.size or 0) > 30 * 1024**2:
+    if image is None or not image.filename:
+        raise HTTPException(422, "请上传一张人物图")
+    if Path(image.filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"} or (image.size or 0) > 30 * 1024**2:
         raise HTTPException(422, "请上传 30 MB 以内的 PNG、JPEG 或 WebP 人物图")
     image.file.seek(0)
     if _sniff_header(image.file.read(16)) != "image":
@@ -834,11 +932,22 @@ async def create_video(
             title = "remix（支持视频编辑）"
             task_price_milli = remix_price_milli(quality)
         elif is_commerce_remix:
-            if kind != "reference" or uploads or upload_fields or first_frame or last_frame or audios or direct_assets:
+            if kind != "reference" or uploads or upload_fields or first_frame or last_frame or audios:
                 raise HTTPException(422, "电商复刻需要一条原视频和可选的人物、商品、场景图片")
-            remix = await validate_commerce_remix_uploads(
-                videos or [], images or [], remix_roles,
-            )
+            if direct_assets:
+                if videos or images:
+                    raise HTTPException(422, "直传素材不能与 multipart 素材混用")
+                direct_objects, staged = await direct_assets_as_uploads(
+                    merchant["id"], kind, direct_assets,
+                )
+                remix = await validate_commerce_remix_uploads(
+                    _uploads_named(staged, "videos"), _uploads_named(staged, "images"), remix_roles,
+                )
+                await restage_normalized(direct_objects, staged)
+            else:
+                remix = await validate_commerce_remix_uploads(
+                    videos or [], images or [], remix_roles,
+                )
             duration, ratio = remix["duration"], remix["ratio"]
             prompt = "根据原片的分镜、动作、声音时间轴和深度参考视频生成电商复刻视频。"
             video_audio_flags = "1" if remix.get("has_audio") else "0"

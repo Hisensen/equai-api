@@ -52,7 +52,7 @@ class PortalContractTest(unittest.TestCase):
             self.assertNotIn(field, script)
         self.assertIn('id="studioNote"', page)
         self.assertIn('creative-note', script)
-        self.assertIn('/creative.js?v=digital-human-workflow-20261006-r5', page)
+        self.assertIn('/creative.js?v=direct-upload-20261006-r6', page)
         self.assertIn('/app.js?v=preview-speed-20261006-r8', page)
         self.assertIn('data-open-app="digital-human"', page)
         self.assertIn('id="page-digital-human"', page)
