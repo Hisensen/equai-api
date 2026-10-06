@@ -106,7 +106,12 @@ async def transcribe(
             status = str(output.get("task_status") or value.get("task_status") or "").upper()
             if status in {"PENDING", "RUNNING", "QUEUED", ""}:
                 continue
-            if status not in {"SUCCEEDED", "SUCCESS", "COMPLETED"}:
+            # SUCCESS_WITH_NO_VALID_FRAGMENT means the transcription ran and found
+            # no speech -- a silent clip, music only, or ambience. That is an empty
+            # transcript, not a failure: a product video with background music and
+            # no voiceover is ordinary input, and treating it as an error used to
+            # kill the whole task.
+            if not status.startswith(("SUCCEED", "SUCCESS", "COMPLETED")):
                 message = output.get("message") or value.get("message") or status
                 raise AsrError(f"语音转写任务失败: {message}")
             # DashScope returns a short-lived transcription_url rather than

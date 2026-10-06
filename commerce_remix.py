@@ -290,7 +290,13 @@ async def _run(task_id: str) -> None:
         })
         asr_runtime = runtime.get("asr") or {}
         if options.get("has_audio") and asr_runtime.get("error"):
-            raise RuntimeError(f"ASR 语音识别失败：{asr_runtime['error']}")
+            # Losing the transcript costs dialogue fidelity, not the video. The
+            # ordinary remix path has always continued here, and failing a paid
+            # task because the speech service was unavailable is the worse
+            # outcome; the reason is kept on the task for support.
+            log.warning("Commerce remix %s continues without a transcript: %s",
+                        row["id"], asr_runtime["error"])
+            options["asr_error"] = str(asr_runtime["error"])[:200]
         analysis["commerce_depth"] = True
         analysis["remix2"] = True
         options["analysis"] = analysis

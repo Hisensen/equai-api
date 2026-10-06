@@ -81,3 +81,40 @@ class AsrServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SilentSourceTest(unittest.TestCase):
+    """A clip with music but no speech must transcribe to nothing, not fail.
+
+    DashScope reports that case as SUCCESS_WITH_NO_VALID_FRAGMENT. It used to miss
+    the success allowlist and raise, which failed the whole 电商复刻 task -- and a
+    product video with background music and no voiceover is ordinary input.
+    """
+
+    def _poll(self, status: str):
+        class Client:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return None
+            async def post(self, *_a, **_k):
+                return httpx.Response(200, json={"output": {"task_id": "t1"}})
+            async def get(self, *_a, **_k):
+                return httpx.Response(200, json={"output": {"task_status": status}})
+
+        with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test-key",
+                                     "H3_ASR_ENABLED": "1",
+                                     "H3_ASR_POLL_INTERVAL_SEC": "0"}), \
+                patch.object(asr_service.httpx, "AsyncClient", Client):
+            return asyncio.run(asr_service.transcribe("https://example/a.mp4"))
+
+    def test_no_valid_fragment_is_an_empty_transcript(self) -> None:
+        result = self._poll("SUCCESS_WITH_NO_VALID_FRAGMENT")
+        self.assertEqual(result["status"], "SUCCESS_WITH_NO_VALID_FRAGMENT")
+        self.assertEqual(asr_service.transcript_text(result), "")
+
+    def test_ordinary_success_still_works(self) -> None:
+        self.assertEqual(self._poll("SUCCEEDED")["status"], "SUCCEEDED")
+
+    def test_a_real_failure_still_raises(self) -> None:
+        with self.assertRaises(asr_service.AsrError):
+            self._poll("FAILED")
