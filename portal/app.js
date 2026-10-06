@@ -17,12 +17,8 @@ let studioSelectedTaskId = localStorage.getItem("equaiStudioTaskId") || "";
 let studioSelectedTaskDetail = null;
 let balanceHasAnimated = false;
 let ambientLoginTimer = 0;
+let sessionExpiredHandled = false;
 const studioReferences = {images: [], videos: [], audios: []};
-const studioInlinePreview = document.createElement("section");
-studioInlinePreview.className = "task-inline-preview";
-studioInlinePreview.innerHTML = `
-  <div class="task-inline-preview-head"><span>本条生成结果</span><a class="btn small" target="_blank" rel="noopener">下载视频</a></div>
-  <div class="task-inline-media"><video controls playsinline preload="metadata"></video></div>`;
 
 function loadAmbientVideo(video) {
   if (!video || video.dataset.loaded === "true") return;
@@ -44,12 +40,18 @@ function loadAmbientVideo(video) {
 
 function syncAmbientVideo() {
   const login = $("#ambientVideo"), consoleVideo = $("#consoleAmbientVideo");
+  if (document.body.classList.contains("auth-mode")) {
+    login?.pause(); consoleVideo?.pause();
+    return;
+  }
   const active = document.body.classList.contains("auth-mode") ? login : consoleVideo;
   const inactive = active === login ? consoleVideo : login;
   clearTimeout(ambientLoginTimer);
   if (inactive) inactive.pause();
-  if (active === login && active?.dataset.loaded !== "true") {
-    ambientLoginTimer = setTimeout(() => loadAmbientVideo(active), 180);
+  if (active?.dataset.loaded !== "true") {
+    ambientLoginTimer = setTimeout(() => {
+      if (!document.body.classList.contains("auth-mode")) loadAmbientVideo(active);
+    }, 1800);
   } else {
     loadAmbientVideo(active);
     active?.play().catch(() => null);
@@ -57,6 +59,35 @@ function syncAmbientVideo() {
 }
 
 syncAmbientVideo();
+
+function showLoginForm(mode = "login") {
+  if (mode !== "login" && mode !== "register") return;
+  $("#loginCoverMusic")?.pause();
+  $("#bgm-control")?.classList.remove("is-playing");
+  $("#bgm-control")?.setAttribute("aria-pressed", "false");
+  $("#authView").classList.remove("hidden");
+  document.body.classList.remove("landing-active");
+  document.body.classList.add("auth-form-active");
+  const tab = $(`[data-auth="${mode}"]`);
+  if (tab && !tab.classList.contains("active")) tab.click();
+  requestAnimationFrame(() => $(mode === "login" ? "#loginUsername" : "#regUsername")?.focus({preventScroll:true}));
+}
+
+document.addEventListener("click", event => {
+  const button = event.target.closest("[data-open-auth]");
+  if (button) showLoginForm(button.dataset.openAuth);
+});
+const aboutDialog = $("#aboutDialog");
+$("#aboutOpen")?.addEventListener("click", () => aboutDialog?.showModal());
+$("#aboutClose")?.addEventListener("click", () => aboutDialog?.close());
+aboutDialog?.addEventListener("click", event => {
+  if (event.target === aboutDialog) aboutDialog.close();
+});
+$$('[data-return-cover]').forEach(button => button.addEventListener("click", () => {
+  $("#authView").classList.add("hidden");
+  document.body.classList.remove("auth-form-active");
+  document.body.classList.add("landing-active");
+}));
 
 function applyTheme(theme, persist = true) {
   const value = theme === "light" ? "light" : "dark";
@@ -99,7 +130,12 @@ async function api(path, options = {}) {
   const response = await fetch(path, {credentials:"same-origin", ...options, headers:{...(options.body && !(options.body instanceof FormData) ? {"Content-Type":"application/json"} : {}), ...(options.headers || {})}});
   if (response.status === 204) return null;
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || `请求失败 (${response.status})`);
+  if (response.status === 401) handleSessionExpired();
+  if (!response.ok) {
+    const error = new Error(body.detail || `请求失败 (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return body;
 }
 
@@ -121,7 +157,12 @@ function uploadForm(path, form, headers = {}, onPhase = () => {}) {
     xhr.addEventListener("load", () => {
       const body = (() => { try { return JSON.parse(xhr.responseText || "{}"); } catch { return {}; } })();
       if (xhr.status >= 200 && xhr.status < 300) resolve(body);
-      else reject(new Error(body.detail || `请求失败 (${xhr.status})`));
+      else {
+        if (xhr.status === 401) handleSessionExpired();
+        const error = new Error(body.detail || `请求失败 (${xhr.status})`);
+        error.status = xhr.status;
+        reject(error);
+      }
     });
     xhr.addEventListener("error", () => reject(new Error("上传连接中断，请检查网络后重试")));
     xhr.addEventListener("timeout", () => reject(new Error("上传超过 10 分钟，已停止等待，请检查网络后重试")));
@@ -261,6 +302,10 @@ $$('[data-auth]').forEach(btn => btn.addEventListener("click", () => {
   $("#registerForm").classList.toggle("hidden", btn.dataset.auth !== "register");
 }));
 
+$("#loginForm").addEventListener("input", () => {
+  $("#loginError").textContent = "";
+});
+
 $$('[data-toggle-password]').forEach(button => button.addEventListener("click", () => {
   const input = document.getElementById(button.dataset.togglePassword);
   const showing = input.type === "text";
@@ -299,7 +344,7 @@ $("#registerForm").addEventListener("submit", async event => {
 $("#logoutBtn").addEventListener("click", async () => {
   await api("/api/account/logout", {method:"POST"}).catch(() => null);
   clearTimeout(studioPollTimer);
-  account = null; document.body.classList.add("auth-mode"); $("#consoleView").classList.add("hidden"); $("#authView").classList.remove("hidden"); $("#logoutBtn").classList.add("hidden"); syncAmbientVideo();
+  account = null; document.body.classList.add("auth-mode", "landing-active"); document.body.classList.remove("auth-form-active"); $("#consoleView").classList.add("hidden"); $("#authView").classList.add("hidden"); $("#loginLanding").classList.remove("hidden"); $("#logoutBtn").classList.add("hidden"); syncAmbientVideo();
 });
 $("#copySecret").addEventListener("click", async () => { await navigator.clipboard.writeText(secret); toast("已复制"); });
 $("#closeSecret").addEventListener("click", () => $("#secretModal").classList.add("hidden"));
@@ -312,7 +357,7 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape") $("#communityModal").classList.add("hidden");
 });
 
-const APP_PAGES = new Set(["studio", "commerce-remix", "digital-human", "digital-human2", "editor", "image-edit"]);
+const APP_PAGES = new Set(["studio", "commerce-remix", "digital-human", "editor", "image-edit"]);
 
 function switchApiTab(name) {
   if (name !== "keys" && name !== "docs") return;
@@ -364,6 +409,132 @@ $$('[data-page]').forEach(btn => btn.addEventListener("click", () => switchPage(
 $$('[data-api-tab]').forEach(btn => btn.addEventListener("click", () => switchApiTab(btn.dataset.apiTab)));
 $$('[data-overview-record]').forEach(btn => btn.addEventListener("click", () => setOverviewRecord(btn.dataset.overviewRecord)));
 $$('[data-open-app]').forEach(btn => btn.addEventListener("click", () => switchPage(btn.dataset.openApp)));
+
+// Application discovery is isolated to the tool directory; existing tool pages keep their own flows.
+const appFavoritesKey = "equaiAppFavorites";
+let appCategory = "全部";
+let showAppFavorites = false;
+function readAppFavorites() {
+  try { return new Set(JSON.parse(localStorage.getItem(appFavoritesKey) || "[]")); }
+  catch { return new Set(); }
+}
+function applyAppDirectoryFilter() {
+  const favorites = readAppFavorites();
+  let visible = 0;
+  $$("#appLaunchGrid .app-launch-card").forEach(card => {
+    const matchesCategory = appCategory === "全部" || card.dataset.appCategory === appCategory;
+    const matchesFavorites = !showAppFavorites || favorites.has(card.dataset.appId);
+    const shown = matchesCategory && matchesFavorites;
+    card.classList.toggle("is-filtered-out", !shown);
+    visible += Number(shown);
+    const favorite = card.querySelector(".app-favorite");
+    const active = favorites.has(card.dataset.appId);
+    favorite?.setAttribute("aria-pressed", String(active));
+    if (favorite) favorite.textContent = active ? "♥" : "♡";
+  });
+  const empty = $("#appsEmptyState");
+  empty?.classList.toggle("hidden", visible > 0);
+  const count = $("#page-apps .apps-count");
+  if (count) count.textContent = `${visible} 个工具`;
+}
+function toggleAppFavorite(card) {
+  if (!card) return;
+  const favorites = readAppFavorites();
+  const appId = card.dataset.appId;
+  favorites.has(appId) ? favorites.delete(appId) : favorites.add(appId);
+  try { localStorage.setItem(appFavoritesKey, JSON.stringify([...favorites])); } catch {}
+  applyAppDirectoryFilter();
+}
+document.addEventListener("click", event => {
+  const favorite = event.target.closest(".app-favorite");
+  if (favorite) {
+    event.preventDefault(); event.stopPropagation();
+    toggleAppFavorite(favorite.closest(".app-launch-card"));
+  }
+}, true);
+document.addEventListener("keydown", event => {
+  const favorite = event.target.closest?.(".app-favorite");
+  if (favorite && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault(); event.stopPropagation();
+    toggleAppFavorite(favorite.closest(".app-launch-card"));
+  }
+});
+$$('#page-apps [role="tab"][data-app-category]').forEach(button => button.addEventListener("click", () => {
+  appCategory = button.dataset.appCategory;
+  showAppFavorites = false;
+  $("#appFavoritesToggle")?.setAttribute("aria-pressed", "false");
+  $$('[data-app-category][role="tab"]').forEach(tab => tab.setAttribute("aria-selected", String(tab === button)));
+  applyAppDirectoryFilter();
+}));
+$("#appFavoritesToggle")?.addEventListener("click", event => {
+  showAppFavorites = !showAppFavorites;
+  event.currentTarget.setAttribute("aria-pressed", String(showAppFavorites));
+  if (showAppFavorites) $$('[data-app-category][role="tab"]').forEach(tab => tab.setAttribute("aria-selected", "false"));
+  else {
+    appCategory = "全部";
+    $('[data-app-category="全部"]')?.setAttribute("aria-selected", "true");
+  }
+  applyAppDirectoryFilter();
+});
+$$('[data-app-example]').forEach(button => button.addEventListener("click", () => {
+  const input = $("#appRecommendQuery");
+  if (!input) return;
+  input.value = button.dataset.appExample || "";
+  input.focus();
+  input.form?.requestSubmit();
+}));
+$("#appRecommendForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = $("#appRecommendQuery"), submit = $("#appRecommendSubmit");
+  const status = $("#appRecommendStatus"), results = $("#appRecommendResults");
+  const query = input?.value.trim() || "";
+  if (query.length < 2) {
+    status.textContent = "多说一点你想完成的事情，我来帮你找。";
+    status.classList.add("is-error");
+    input?.focus();
+    return;
+  }
+  submit.disabled = true;
+  status.classList.remove("is-error");
+  status.textContent = "正在为你找合适的工具…";
+  results.classList.add("hidden");
+  results.replaceChildren();
+  try {
+    const data = await api("/api/account/apps/recommend", {method:"POST", body:JSON.stringify({query})});
+    const available = new Map($$("#appLaunchGrid .app-launch-card").map(card => [card.dataset.appId, card]));
+    const matches = (data.results || []).filter(item => available.has(item.app_id));
+    if (!matches.length) throw new Error("暂时没找到合适的应用，请换种说法或使用分类浏览");
+    results.innerHTML = matches.map(item => `<button type="button" class="app-recommend-result" data-recommended-app="${esc(item.app_id)}"><small>${esc(item.category)} · 为你推荐</small><strong>${esc(item.name)} →</strong><span>${esc(item.reason)}</span></button>`).join("");
+    results.classList.remove("hidden");
+    status.textContent = "找到这些工具，点一下就能开始。";
+  } catch (error) {
+    const unavailable = /请求失败 \((?:404|405)\)/.test(error.message || "")
+      || error.message === "Method Not Allowed" || error.message === "Not Found";
+    status.textContent = window.__EQUAI_LOCAL_PREVIEW__
+      && (error instanceof TypeError || /请求失败 \(\d{3}\)/.test(error.message))
+      ? "当前是本地静态预览，未连接 API 后端；登录后会由 DeepSeek 帮你推荐应用。"
+      : unavailable
+        ? "AI 推荐暂时不可用，请使用下方分类和工具卡继续操作。"
+      : (error.message || "AI 推荐暂时不可用，请使用下方分类浏览应用。");
+    status.classList.add("is-error");
+  } finally {
+    submit.disabled = false;
+  }
+});
+$("#appRecommendResults")?.addEventListener("click", event => {
+  const result = event.target.closest("[data-recommended-app]");
+  if (!result) return;
+  const appId = result.dataset.recommendedApp;
+  const query = $("#appRecommendQuery")?.value.trim() || "";
+  switchPage(appId);
+  const promptByApp = {studio:"#studioPrompt", editor:"#editorPrompt", "image-edit":"#editPrompt", music:"#musicPrompt"};
+  const prompt = promptByApp[appId] ? $(promptByApp[appId]) : null;
+  if (prompt && query && !prompt.value.trim()) {
+    prompt.value = query;
+    prompt.dispatchEvent(new Event("input", {bubbles:true}));
+  }
+});
+applyAppDirectoryFilter();
 $$('[data-go]').forEach(btn => btn.addEventListener("click", () => {
   if (btn.dataset.scrollTarget === "callHistory") setOverviewRecord("calls");
   if (btn.dataset.scrollTarget === "pointsLedger") setOverviewRecord("ledger");
@@ -374,6 +545,7 @@ $$('[data-go]').forEach(btn => btn.addEventListener("click", () => {
 }));
 
 function renderAccount(current) {
+  sessionExpiredHandled = false;
   account = current;
   $("#merchantName").textContent = account.username; $("#merchantId").textContent = account.id;
   const balanceTarget = Number(account.balance);
@@ -393,8 +565,32 @@ function renderAccount(current) {
   $("#studioBalance").textContent = Number(account.balance).toFixed(3);
   $("#balanceRail").style.width = `${Math.min(100, Math.max(2, Number(account.balance) * 10))}%`;
   $("#completedCount").textContent = account.usage.completed; $("#activeCount").textContent = account.usage.active;
-  const status = $("#accountStatus"); status.textContent = statusLabel(account.status); status.className = `status ${account.status}`;
+  const status = $("#accountStatus");
+  if (status) { status.textContent = statusLabel(account.status); status.className = `status ${account.status}`; }
   $("#pendingNotice").classList.toggle("hidden", account.status !== "pending");
+}
+
+function handleSessionExpired() {
+  if (!account || sessionExpiredHandled) return;
+  sessionExpiredHandled = true;
+  const currentAccount = account;
+  fetch("/api/account/me", {credentials:"same-origin", cache:"no-store"}).then(response => {
+    if (response.status !== 401 || account !== currentAccount) {
+      sessionExpiredHandled = false;
+      return;
+    }
+    account = null;
+    clearTimeout(studioPollTimer);
+    document.body.classList.add("auth-mode", "auth-form-active");
+    document.body.classList.remove("landing-active");
+    $("#consoleView").classList.add("hidden");
+    $("#loginLanding").classList.add("hidden");
+    $("#authView").classList.remove("hidden");
+    const loginTab = $('[data-auth="login"]');
+    if (loginTab && !loginTab.classList.contains("active")) loginTab.click();
+    $("#loginError").textContent = "登录已过期，请重新登录后继续使用。";
+    syncAmbientVideo();
+  }).catch(() => { sessionExpiredHandled = false; });
 }
 
 async function refreshAccount() {
@@ -403,15 +599,16 @@ async function refreshAccount() {
   return current;
 }
 
-async function enterConsole() {
-  const current = await api("/api/account/me");
-  document.body.classList.remove("auth-mode");
-  $("#authView").classList.add("hidden"); $("#consoleView").classList.remove("hidden"); $("#logoutBtn").classList.remove("hidden");
+async function enterConsole(current = null) {
+  current = current || await api("/api/account/me");
+  document.body.classList.remove("auth-mode", "landing-active", "auth-form-active");
+  $("#loginLanding").classList.add("hidden"); $("#authView").classList.add("hidden"); $("#consoleView").classList.remove("hidden"); $("#logoutBtn").classList.remove("hidden");
   syncAmbientVideo();
   renderAccount(current);
   $$(".api-origin").forEach(el => el.textContent = location.origin);
   switchPage(location.hash.slice(1) || "overview");
 }
+
 
 const STUDIO_KIND_LABEL = {text:"文生视频", image:"首帧 / 首尾帧", reference:"多参考"};
 const STUDIO_REFERENCE_LABEL = {images:"图片", videos:"视频", audios:"音频"};
@@ -593,7 +790,9 @@ function renderStudioTask(task) {
     empty.classList.add("hidden");
     const signedUrlExpired = Number(video.dataset.urlExpiresAt || 0) <= Date.now();
     if (video.dataset.taskId !== task.id || signedUrlExpired) {
-      video.src = artifact.download_url;
+      video.preload = "none";
+      video.poster = artifact.poster_url || "";
+      video.src = artifact.preview_url || artifact.download_url;
       video.dataset.taskId = task.id;
       video.dataset.urlExpiresAt = String(Date.now() + Number(artifact.download_url_expires_in || 3600) * 1000);
     }
@@ -660,62 +859,71 @@ function watchStudioTask(task) {
 
 function renderStudioTaskList(items) {
   const host = $("#studioTaskList");
-  const inlineVideo = studioInlinePreview.querySelector("video");
-  const inlineWasPlaying = !inlineVideo.paused;
-  const inlineTime = Number.isFinite(inlineVideo.currentTime) ? inlineVideo.currentTime : 0;
-  studioInlinePreview.remove();
   const activeCount = items.filter(studioTaskIsActive).length;
   $("#studioTaskSummary").textContent = `${items.length} 个任务${activeCount ? ` · ${activeCount} 个进行中` : ""}`;
   if (!items.length) {
-    inlineVideo.pause();
     host.innerHTML = '<div class="task-center-empty">还没有通过网页应用创建任务</div>';
     return;
   }
-  host.innerHTML = items.slice(0, 30).map(task => {
+  const actions = host.closest(".studio-task-center")?.querySelector(".task-center-actions");
+  if (actions && !actions.querySelector(".task-carousel-controls")) {
+    const controls = document.createElement("span"); controls.className = "task-carousel-controls";
+    for (const [label, direction] of [["向左浏览", -1], ["向右浏览", 1]]) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "task-carousel-button";
+      button.textContent = direction < 0 ? "←" : "→"; button.setAttribute("aria-label", label);
+      button.addEventListener("click", () => host.scrollBy({left:direction * Math.max(host.clientWidth * .8, 260), behavior:"smooth"}));
+      controls.append(button);
+    }
+    actions.prepend(controls);
+  }
+  host.innerHTML = items.slice(0, 6).map(task => {
     const progress = Math.max(0, Math.min(100, Number(task.progress) || 0));
     const selected = task.id === studioSelectedTaskId;
-    const message = task.status === "completed" ? "点击查看并播放结果" : (task.error || task.message || statusLabel(task.status));
     const promptPreview = task.note || task.prompt_preview || STUDIO_KIND_LABEL[task.kind] || "未命名任务";
     const completed = task.status === "completed";
     const activeClass = task.status === "running" ? " is-running" : task.status === "dispatching" ? " is-dispatching" : "";
     const taskProgress = completed ? 100 : progress;
     return `<article class="studio-task-card${selected ? " selected" : ""}${completed ? " is-complete" : ""}${activeClass}">
       <button class="studio-task-main" type="button" data-studio-task="${esc(task.id)}">
-        <span class="task-card-head"><strong class="task-prompt" title="${esc(promptPreview)}">${esc(promptPreview)}</strong><span class="task-mini-state ${esc(task.status)}">${esc(statusLabel(task.status))}</span></span>
-        <span class="task-card-meta"><span>${esc(STUDIO_KIND_LABEL[task.kind] || task.kind)} · ${esc(task.quality)} · ${Number(task.duration)} 秒 · ${esc(task.ratio)}</span><span>${esc(stamp(task.created_at))}</span></span>
-        <span class="task-mini-progress"><i style="width:${taskProgress}%"></i></span>
-        <span class="task-card-foot"><span>${esc(message)} · ${esc(task.id.slice(-8))}</span><b>${taskProgress}%</b></span>
+        <span class="task-card-thumb" aria-hidden="true"><span>▶</span><i>${completed ? "视频" : esc(statusLabel(task.status))}</i></span>
+        <span class="task-card-copy"><span class="task-card-head"><strong class="task-prompt" title="${esc(promptPreview)}">${esc(promptPreview)}</strong><span class="task-mini-state ${esc(task.status)}">${esc(statusLabel(task.status))}</span></span>
+        <span class="task-card-meta">${esc(STUDIO_KIND_LABEL[task.kind] || task.kind)} · ${esc(task.quality)} · ${Number(task.duration)} 秒 · ${esc(task.ratio)}</span>
+        <span class="task-mini-progress"><i style="width:${taskProgress}%"></i></span></span>
       </button>
-      <button class="task-note-edit" type="button" data-note-studio-task="${esc(task.id)}" aria-label="${task.note ? "修改" : "添加"}视频备注" title="${task.note ? "修改备注" : "添加备注"}">${task.note ? "改备注" : "备注"}</button>
-      <button class="task-delete" type="button" data-delete-studio-task="${esc(task.id)}" aria-label="删除任务 ${esc(task.id.slice(-8))}" title="删除任务">删除</button>
+      <span class="task-card-actions"><button class="task-note-edit" type="button" data-note-studio-task="${esc(task.id)}" aria-label="${task.note ? "修改" : "添加"}视频备注" title="${task.note ? "修改备注" : "添加备注"}">${task.note ? "改备注" : "备注"}</button><button class="task-delete" type="button" data-delete-studio-task="${esc(task.id)}" aria-label="删除任务 ${esc(task.id.slice(-8))}" title="删除任务">删除</button></span>
     </article>`;
   }).join("");
   host.querySelectorAll("[data-studio-task]").forEach(button => button.addEventListener("click", () => selectStudioTask(button.dataset.studioTask)));
   host.querySelectorAll("[data-delete-studio-task]").forEach(button => button.addEventListener("click", () => deleteStudioTask(button.dataset.deleteStudioTask, button)));
   host.querySelectorAll("[data-note-studio-task]").forEach(button => button.addEventListener("click", () => editStudioTaskNote(button.dataset.noteStudioTask, button)));
-  const detail = studioSelectedTaskDetail?.id === studioSelectedTaskId ? studioSelectedTaskDetail : null;
-  const artifact = detail?.status === "completed"
-    ? (detail.artifacts?.find(item => item.media === "video") || detail.artifacts?.[0])
-    : null;
-  const selectedCard = host.querySelector(`[data-studio-task="${CSS.escape(studioSelectedTaskId)}"]`)?.closest(".studio-task-card");
-  if (selectedCard && artifact?.download_url) {
-    const changed = inlineVideo.dataset.taskId !== detail.id
-      || Number(inlineVideo.dataset.urlExpiresAt || 0) <= Date.now();
-    if (changed) {
-      inlineVideo.pause();
-      inlineVideo.src = artifact.download_url;
-      inlineVideo.dataset.taskId = detail.id;
-      inlineVideo.dataset.urlExpiresAt = String(Date.now() + Number(artifact.download_url_expires_in || 3600) * 1000);
-    }
-    studioInlinePreview.classList.toggle("portrait", detail.ratio === "9:16");
-    studioInlinePreview.querySelector("span").textContent = detail.note || "本条生成结果";
-    studioInlinePreview.querySelector("a").href = artifact.download_url;
-    selectedCard.appendChild(studioInlinePreview);
-    if (!changed && inlineTime > 0 && Math.abs(inlineVideo.currentTime - inlineTime) > .25) inlineVideo.currentTime = inlineTime;
-    if (!changed && inlineWasPlaying && inlineVideo.paused) inlineVideo.play().catch(() => null);
-  } else {
-    inlineVideo.pause();
+  items.slice(0, 6).forEach((task, index) => {
+    const card = host.querySelector(`[data-studio-task="${CSS.escape(task.id)}"]`)?.closest(".studio-task-card");
+    if (!card?.isConnected) return;
+    if ("IntersectionObserver" in window) {
+      studioPosterTasks.set(card, task);
+      studioPosterObserver.observe(card);
+    } else loadStudioTaskPoster(task, card);
+  });
+}
+
+const studioPosterTasks = new WeakMap();
+const studioPosterObserver = "IntersectionObserver" in window ? new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    const card = entry.target, task = studioPosterTasks.get(card);
+    if (task) loadStudioTaskPoster(task, card);
+    studioPosterObserver.unobserve(card);
   }
+}, {rootMargin:"240px 0px"}) : null;
+
+function loadStudioTaskPoster(task, card) {
+  if (!card || task.status !== "completed" || card.dataset.posterLoaded) return;
+  const artifact = task.artifacts?.find(item => item.media === "video"), url = artifact?.poster_url;
+  const thumb = card.querySelector(".task-card-thumb");
+  if (!url || !thumb) return;
+  card.dataset.posterLoaded = "true";
+  const image = document.createElement("img"); image.src = url; image.alt = ""; image.loading = "lazy"; image.decoding = "async";
+  image.onerror = () => image.remove(); thumb.prepend(image);
 }
 
 async function editStudioTaskNote(taskId, button) {
@@ -748,8 +956,6 @@ async function editStudioTaskNote(taskId, button) {
 
 function resetStudioResult() {
   stopStudioTaskEvents();
-  studioInlinePreview.querySelector("video").pause();
-  studioInlinePreview.remove();
   const resultStage = $("#studioResultStage");
   $(".studio-result").classList.remove("is-complete");
   resultStage.classList.remove("is-generating", "is-complete", "portrait");
@@ -838,12 +1044,11 @@ async function refreshStudioTaskCenter() {
       const selected = await api(`/api/account/tasks/${encodeURIComponent(studioSelectedTaskId)}`);
       if (selected.id === studioSelectedTaskId) {
         studioSelectedTaskDetail = selected;
-        renderStudioTaskList(studioTaskItems);
         renderStudioTask(selected);
         watchStudioTask(selected);
       }
     }
-    await refreshAccount();
+    void refreshAccount().catch(() => null);
     // Keep every task card fresh. The event stream only follows the selected
     // task and can remain open without delivering data through some clients.
     scheduleStudioTaskRefresh();
@@ -861,6 +1066,11 @@ function resumeStudioTask() {
 }
 
 $("#studioRefreshTasks").addEventListener("click", refreshStudioTaskCenter);
+$$('[data-studio-scroll]').forEach(button => button.addEventListener("click", () => {
+  const list = $("#studioTaskList");
+  const direction = Number(button.dataset.studioScroll) || 1;
+  list.scrollBy({left: direction * Math.max(220, list.clientWidth * 0.78), behavior: "smooth"});
+}));
 
 $("#videoAppForm").addEventListener("submit", async event => {
   event.preventDefault();
@@ -941,31 +1151,85 @@ function callsMarkup(items) {
     const promptPreview = item.note || (commerceTask ? item.title : item.prompt_preview || item.title) || "未命名任务";
     const taskError = commerceTask && item.error ? "生成失败，请稍后重试。" : item.error;
     const toolLabel = commerceTask ? "电商复刻" : item.tool === "remix" ? "remix（支持视频编辑）" : item.tool === "image_edit" ? "图片编辑" : STUDIO_KIND_LABEL[item.kind] || item.kind;
+    const created = item.created_at ? new Date(item.created_at * 1000).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}) : "—";
     return `<tr>
-    <td class="call-task-cell"><span class="call-prompt" title="${esc(promptPreview)}">${esc(promptPreview)}</span><span class="call-task-meta">${esc(toolLabel)} · <code title="${esc(item.id)}">${esc(item.id.slice(-8))}</code></span></td>
-    <td>${esc(toolLabel)}<br><span class="muted">${item.tool === "image_edit" ? "图片" : `${esc(item.quality)} · ${Number(item.duration)}s`}</span></td>
+    <td>${created}</td>
+    <td>${esc(toolLabel)}</td>
+    <td class="call-task-cell"><span class="call-prompt" title="${esc(promptPreview)}">${esc(promptPreview)}</span><span class="call-task-meta"><code title="${esc(item.id)}">${esc(item.id.slice(-8))}</code> · ${item.tool === "image_edit" ? "图片" : `${esc(item.quality)} · ${Number(item.duration)}s`}</span></td>
     <td><span class="status ${esc(item.status)}">${esc(statusLabel(item.status))}</span>${taskError ? `<br><span class="danger">${esc(taskError.slice(0, 90))}</span>` : ""}</td>
-    <td>${stamp(item.created_at)}<br><span class="muted">运行 ${duration(item.run_seconds)}</span></td>
-    <td>${Number(item.charged).toFixed(3)} pt<br><span class="muted">冻结价 ${Number(item.price).toFixed(3)}</span></td>
+    <td>${Number(item.charged).toFixed(3)} pt<br><span class="muted">冻结 ${Number(item.price).toFixed(3)}</span></td>
     <td class="call-result-cell">
-      <span class="call-result-expiry">${item.output_expired ? "已清理" : (item.output_expires_at ? stamp(item.output_expires_at) : "—")}</span>
       <div class="call-result-actions">
-        <button class="btn small task-detail" type="button" data-task="${esc(item.id)}">查看详情</button>
-        <button class="btn primary small task-download" type="button" data-task="${esc(item.id)}" ${item.status === "completed" && !item.output_expired && item.artifacts?.length ? "" : "disabled"}>下载${item.tool === "image_edit" ? "图片" : "视频"}</button>
+        <button class="btn small task-detail" type="button" data-task="${esc(item.id)}">查看</button>
+        <button class="btn primary small task-download" type="button" data-task="${esc(item.id)}" ${item.status === "completed" && !item.output_expired && item.artifacts?.length ? "" : "disabled"}>下载</button>
       </div>
+      <span class="call-result-expiry">${item.output_expired ? "文件已清理" : (item.output_expires_at ? `保留至 ${stamp(item.output_expires_at)}` : "")}</span>
     </td>
   </tr>`;
   }).join("");
-  return `<div class="table-wrap"><table><thead><tr><th>任务</th><th>类型</th><th>状态</th><th>时间</th><th>扣分</th><th>结果</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>创建时间</th><th>应用</th><th>任务</th><th>状态</th><th>消耗积分</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+let callItems = [];
+function callAppId(item) {
+  const value = `${item.tool || ""} ${item.kind || ""} ${item.title || ""}`.toLowerCase();
+  if (/commerce|ecommerce|电商复刻/.test(value)) return "commerce-remix";
+  if (/digital.?human|数字人/.test(value)) return "digital-human";
+  if (/music|audio|音乐/.test(value)) return "music";
+  if (/image.?edit|图片编辑/.test(value)) return "image-edit";
+  if (/video.?edit|remix|视频编辑/.test(value)) return "editor";
+  return "studio";
+}
+function filteredCallItems() {
+  const query = $("#callSearch")?.value.trim().toLocaleLowerCase() || "";
+  const app = $("#callAppFilter")?.value || "";
+  const daysValue = $("#callDateFilter")?.value || "7";
+  const cutoff = daysValue === "all" ? 0 : Date.now() / 1000 - Number(daysValue) * 86400;
+  return callItems.filter(item => {
+    const searchable = `${item.title || ""} ${item.note || ""} ${item.prompt_preview || ""} ${item.tool || ""} ${item.kind || ""} ${item.id || ""}`.toLocaleLowerCase();
+    return (!query || searchable.includes(query))
+      && (!app || callAppId(item) === app)
+      && (!cutoff || Number(item.created_at || 0) >= cutoff);
+  });
+}
+function renderCalls() {
+  const items = filteredCallItems();
+  $("#callTable").innerHTML = callsMarkup(items);
+  $("#callResultCount").textContent = `共 ${items.length} 条`;
+  $$(".task-detail").forEach(btn => btn.addEventListener("click", () => showTask(btn.dataset.task)));
+  $$(".task-download").forEach(btn => btn.addEventListener("click", () => downloadTask(btn.dataset.task, btn)));
 }
 async function loadCalls() {
   const filter = $("#callFilter").value;
   const data = await api(`/api/account/tasks?limit=200${filter ? `&status=${encodeURIComponent(filter)}` : ""}`);
-  $("#callTable").innerHTML = callsMarkup(data.items);
-  $$(".task-detail").forEach(btn => btn.addEventListener("click", () => showTask(btn.dataset.task)));
-  $$(".task-download").forEach(btn => btn.addEventListener("click", () => downloadTask(btn.dataset.task, btn)));
+  callItems = data.items;
+  renderCalls();
 }
 $("#callFilter").addEventListener("change", loadCalls);
+$("#callSearch").addEventListener("input", renderCalls);
+$("#callAppFilter").addEventListener("change", renderCalls);
+$("#callDateFilter").addEventListener("change", renderCalls);
+$("#callRefresh").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try { await loadCalls(); } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
+$("#callExport").addEventListener("click", () => {
+  const rows = filteredCallItems();
+  if (!rows.length) { toast("当前筛选下没有可导出的记录"); return; }
+  const fields = ["创建时间", "应用", "任务", "状态", "消耗积分", "任务编号"];
+  const quote = value => `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const lines = [fields, ...rows.map(item => [
+    item.created_at ? new Date(item.created_at * 1000).toLocaleString("zh-CN", {hour12:false}) : "",
+    ({studio:"视频生成", "commerce-remix":"电商复刻", "digital-human":"数字人", editor:"视频编辑", "image-edit":"图片编辑", music:"音乐编辑"})[callAppId(item)],
+    item.note || item.prompt_preview || item.title || "",
+    statusLabel(item.status), Number(item.charged).toFixed(3), item.id,
+  ])].map(row => row.map(quote).join(",")).join("\r\n");
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob(["\ufeff", lines], {type:"text/csv;charset=utf-8"}));
+  link.download = `EQUAI-调用记录-${new Date().toISOString().slice(0,10)}.csv`;
+  link.click(); URL.revokeObjectURL(link.href);
+});
 
 async function downloadTask(id, button) {
   const originalLabel = button.textContent;
@@ -1078,4 +1342,6 @@ async function loadDocs() {
   }
 }
 
-api("/api/account/me").then(enterConsole).catch(() => {});
+const isLocalPreview = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+  && new URLSearchParams(location.search).has("local-preview");
+if (!isLocalPreview) api("/api/account/me").then(enterConsole).catch(() => {});

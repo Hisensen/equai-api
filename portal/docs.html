@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="EQUAI 商家视频生成 API 文档">
+  <meta name="description" content="EQUAI 商家视频生成与创作应用 API 文档">
   <title>EQUAI API Reference</title>
   <link rel="icon" type="image/png" sizes="256x256" href="/equai-favicon-r34.png">
   <link rel="apple-touch-icon" href="/equai-favicon-r34.png">
@@ -12,19 +12,21 @@
 <body class="docs-body">
   <header class="topbar docs-topbar">
     <a class="brand docs-brand" href="/"><img class="brand-wordmark" src="/equai-mark-white.png" alt="equai"></a>
-    <div class="top-actions"><span class="docs-scope">仅视频生成接口</span><a class="btn ghost small" href="/#docs">返回控制台</a></div>
+    <div class="top-actions"><span class="docs-scope">商家 API 与控制台应用接口</span><a class="btn ghost small" href="/#docs">返回控制台</a></div>
   </header>
 
   <div class="reference-shell">
     <aside class="reference-nav" aria-label="文档目录">
       <div class="reference-version"><span>API VERSION</span><strong>v1</strong></div>
       <nav>
+        <a href="#feature-guide">功能说明</a>
         <a href="#start">快速开始</a>
         <a href="#auth">认证与幂等</a>
         <a href="#fields">公共字段</a>
         <a href="#text">文生视频</a>
         <a href="#image">首尾帧</a>
         <a href="#reference">多参考</a>
+        <a href="#app-apis">创作应用 API</a>
         <a href="#python">Python 示例</a>
         <a href="#status">查询与取消</a>
         <a href="#billing">计费与存储</a>
@@ -33,6 +35,23 @@
     </aside>
 
     <main class="reference-main">
+      <section class="reference-hero" id="feature-guide">
+        <div class="eyebrow">EQUAI · 功能说明</div>
+        <h1>选一个工具，<br>准备对应素材。</h1>
+        <p>先按下面的说明准备素材，再进入应用填写要求并创建任务。生成任务可以在“最近创作”和“账户总览”中查看；失败任务按页面提示处理，成功结果可预览或下载。</p>
+        <div class="quality-rail" aria-label="应用功能简介">
+          <div><span>视频生成</span><strong>文字、图片或多参考素材 → 视频</strong><small>选择生成方式、画幅和清晰度，再写画面描述。</small></div>
+          <div><span>电商复刻</span><strong>原视频 + 替换参考素材 → 新视频</strong><small>上传原片，按页面素材位添加商品、人物或场景参考。</small></div>
+          <div><span>数字人</span><strong>人物图片 + 音频 → 口型同步视频</strong><small>上传清晰正面人物图和要使用的音频。</small></div>
+        </div>
+        <div class="quality-rail" aria-label="更多应用功能简介">
+          <div><span>视频编辑</span><strong>原视频 + 修改描述 → 编辑后视频</strong><small>说清要改的人物、物体或场景；参考图按页面提示添加。</small></div>
+          <div><span>图片编辑</span><strong>图片 + 修改描述 → 新图片</strong><small>上传需要调整的图片，用文字说明目标效果。</small></div>
+          <div><span>音乐编辑</span><strong>音频 + 风格要求 → 编辑版本</strong><small>支持 MP3、WAV、M4A、FLAC；歌词可按页面提示填写或留空识别。</small></div>
+        </div>
+        <div class="mode-note"><strong>AI 应用搜索</strong><span>在应用页用自然语言描述目标，系统会从现有工具中推荐入口。推荐不可用时，可直接按分类选择工具卡；搜索内容会发送给 EQUAI 后端调用 DeepSeek，不会把服务密钥放到浏览器。</span></div>
+        <div class="mode-note"><strong>关于时长、格式和费用</strong><span>不同工具的素材格式、时长限制和积分消耗可能不同，以每个应用表单旁的说明和创建按钮为准；提交前请检查所选参数与预计消耗。</span></div>
+      </section>
       <section class="reference-hero" id="start">
         <div class="eyebrow">EQUAI video generation / merchant contract</div>
         <h1>三个固定入口，<br>三种输入方式。</h1>
@@ -243,6 +262,66 @@ print(task["id"], task["status"])</code></pre></article>
         <div class="mode-note"><strong>高清交付</strong><span>文生、首尾帧和多参考均支持 720P、1080P 和 2K；只需更换创建接口地址，表单字段保持一致。</span></div>
       </section>
 
+      <section class="reference-section" id="app-apis">
+        <div class="section-marker">APPS</div>
+        <div class="section-copy">
+          <h2>其他创作应用接口</h2>
+          <p>视频生成的商家 API Key 接口和查询方式已在上文说明。本节只补充尚未单独列出的电商复刻、数字人、视频编辑、图片编辑和音乐编辑接口。</p>
+          <div class="mode-note warning"><strong>认证边界</strong><span><code>/v1/...</code> 商家 API 使用 <code>Authorization: Bearer h3_live_...</code>；<code>/api/account/...</code> 控制台应用接口使用同源登录 Cookie <code>h3_merchant_session</code>，浏览器请求需带 <code>credentials: "same-origin"</code>。目前只有视频生成提供面向 API Key 的公开创建接口；其余应用接口不能用 API Key 直接调用。</span></div>
+          <div class="table-wrap api-table"><table>
+            <thead><tr><th>应用</th><th>方法与路径</th><th>认证</th><th>关键字段</th></tr></thead>
+            <tbody>
+              <tr><td>电商复刻</td><td><code>POST /api/account/commerce-remix/720p</code></td><td>控制台 Cookie</td><td><code>kind=reference</code>、<code>videos</code>、可重复的 <code>images</code>、<code>remix_roles</code>。</td></tr>
+              <tr><td>数字人</td><td><code>POST /api/account/digital-human/720p</code></td><td>控制台 Cookie</td><td><code>mode=audio</code>、单个 <code>image</code>、单个 <code>audio</code>；可选 <code>ratio=16:9</code>/<code>9:16</code>（默认 16:9）和 <code>prompt</code>。附加提示词按原文追加到 H3 模板画面描述段，留空逐字沿用默认模板；清晰度固定为 1M。</td></tr>
+              <tr><td>视频编辑</td><td><code>POST /api/account/video-edits/720p</code></td><td>控制台 Cookie</td><td><code>kind=reference</code>、<code>videos</code>、<code>prompt</code>、<code>edit_mode</code>；可重复的 <code>images</code> 为参考图。</td></tr>
+              <tr><td>图片编辑</td><td><code>POST /api/account/image-edits</code></td><td>控制台 Cookie</td><td><code>prompt</code> 必填；可重复的 <code>images</code> 最多 4 张，允许不上传图片而按描述生成。</td></tr>
+              <tr><td>音乐编辑</td><td><code>POST /api/account/music</code></td><td>控制台 Cookie</td><td><code>source</code>、<code>style</code>、<code>voice</code>；可选 <code>prompt</code>、<code>lyrics</code>、<code>title</code>。</td></tr>
+            </tbody>
+          </table></div>
+          <h3>控制台请求格式</h3>
+          <p>文件通过 <code>multipart/form-data</code> 上传；浏览器同源登录后会自动携带 HttpOnly 会话 Cookie。每次新建任务建议使用新的 <code>Idempotency-Key</code>，避免网络重试造成重复任务。</p>
+          <div class="code-pair">
+            <article class="code-card"><header><div>电商复刻 · multipart/form-data</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/api/account/commerce-remix/720p' \
+  -b cookies.txt \
+  -H 'Idempotency-Key: commerce-order-001' \
+  -F 'kind=reference' \
+  -F 'videos=@./source.mp4;type=video/mp4' \
+  -F 'images=@./product.png;type=image/png' \
+  -F 'remix_roles=["product"]'</code></pre></article>
+            <article class="code-card"><header><div>数字人 · 16:9 或 9:16 / 固定 1M</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/api/account/digital-human/720p' \
+  -b cookies.txt \
+  -H 'Idempotency-Key: avatar-order-001' \
+  -F 'mode=audio' \
+  -F 'ratio=16:9' \
+  -F 'image=@./portrait.png;type=image/png' \
+  -F 'audio=@./voice.mp3;type=audio/mpeg'</code></pre></article>
+            <article class="code-card"><header><div>视频编辑 · multipart/form-data</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/api/account/video-edits/720p' \
+  -b cookies.txt \
+  -H 'Idempotency-Key: edit-order-001' \
+  -F 'kind=reference' \
+  -F 'prompt=将画面中的蓝色汽车替换为红色汽车' \
+  -F 'edit_mode=reenact' \
+  -F 'videos=@./source.mp4;type=video/mp4' \
+  -F 'images=@./reference.png;type=image/png'</code></pre></article>
+            <article class="code-card"><header><div>图片编辑 · 支持纯文字生成</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/api/account/image-edits' \
+  -b cookies.txt \
+  -H 'Idempotency-Key: image-edit-order-001' \
+  -F 'prompt=保留花瓶主体，将背景改成明亮的日式客厅' \
+  -F 'images=@./source.png;type=image/png'</code></pre></article>
+            <article class="code-card"><header><div>音乐编辑 · 歌词可选</div><button class="copy-code">复制</button></header><pre class="code-block"><code>curl -X POST '<span class="runtime-origin"></span>/api/account/music' \
+  -b cookies.txt \
+  -H 'Idempotency-Key: music-order-001' \
+  -F 'source=@./song.mp3;type=audio/mpeg' \
+  -F 'style=流行摇滚' \
+  -F 'voice=女声' \
+  -F 'prompt=保留旋律，调整为温暖明亮的编曲' \
+  -F 'lyrics=' \
+  -F 'title=歌曲编辑'</code></pre></article>
+          </div>
+          <div class="mode-note"><strong>提交响应与任务结果</strong><span>这些创建接口返回任务 ID、当前状态、进度和积分预留信息。控制台任务查询、备注、删除和结果预览沿用页面当前任务中心；音乐任务管理沿用其现有音乐任务接口。视频生成的公开 API 查询与取消方式见上文“查询与取消”。</span></div>
+        </div>
+      </section>
+
       <section class="reference-section" id="python">
         <div class="section-marker">PY</div>
         <div class="section-copy">
@@ -436,7 +515,7 @@ while True:
               <tr><td><code>429</code></td><td>商户已有 4 个未结束任务</td><td>等待已有任务完成后重试，并保留原 Idempotency-Key。</td></tr>
             </tbody>
           </table></div>
-          <div class="docs-boundary"><strong>文档边界</strong><p>本页仅描述商家可调用的视频创建、查询与取消接口。账户管理、积分调整和平台运维接口不属于商家 API，不公开其结构。</p></div>
+          <div class="docs-boundary"><strong>文档边界</strong><p>本页说明视频生成的商家 API Key 接口，以及控制台创作应用的登录态接口。控制台接口仅供同源登录后的网页使用，不能用商家 API Key 调用。账户管理、积分调整和平台运维接口不在本页范围内。</p></div>
         </div>
       </section>
 

@@ -11,6 +11,38 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PortalContractTest(unittest.TestCase):
+    def test_music_status_does_not_report_expired_login_as_service_outage(self) -> None:
+        app_js = (ROOT / "portal" / "app.js").read_text(encoding="utf-8")
+        creative_js = (ROOT / "portal" / "creative.js").read_text(encoding="utf-8")
+        self.assertIn("error.status = response.status", app_js)
+        self.assertIn("error.status = xhr.status", app_js)
+        self.assertIn("if (response.status === 401) handleSessionExpired();", app_js)
+        self.assertIn("function handleSessionExpired()", app_js)
+        self.assertIn('$("#loginForm").addEventListener("input"', app_js)
+        self.assertIn("authExpired: error.status === 401", creative_js)
+        self.assertIn("登录已失效，请重新登录后使用音乐编辑。", creative_js)
+        self.assertIn("const musicErrorMessage = error => error?.status === 401", creative_js)
+
+    def test_digital_human_price_is_displayed_per_fifteen_second_segment(self) -> None:
+        page = (ROOT / "portal" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "portal" / "creative.js").read_text(encoding="utf-8")
+        self.assertIn("每 15 秒 1.000 pt，不足 15 秒按 1 段计", page)
+        self.assertIn("每 15 秒 ${digitalHumanPricePerSegment.toFixed(3)} pt", script)
+        self.assertIn("const billableDuration = completeWindows > 0 && tail > 0 && tail < 1", script)
+
+    def test_digital_human_prompt_is_optional_and_uses_literal_h3_template_composition(self) -> None:
+        page = (ROOT / "portal" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "portal" / "creative.js").read_text(encoding="utf-8")
+        docs = (ROOT / "portal" / "docs.html").read_text(encoding="utf-8")
+        digital_human = page[page.index('id="page-digital-human"'):page.index('id="page-editor"')]
+        self.assertIn('id="digitalHumanPrompt" maxlength="30000"', digital_human)
+        self.assertIn("按原文追加到 H3 模板的画面描述段落，不经 AI 改写", digital_human)
+        self.assertIn('<option value="16:9">横屏 · 16:9</option>', digital_human)
+        self.assertIn('<option value="9:16">竖屏 · 9:16</option>', digital_human)
+        submit = script[script.index('$("#digitalHumanForm").addEventListener("submit"'):script.index('$("#imageEditForm").addEventListener("submit"')]
+        self.assertIn('form.append("prompt", $("#digitalHumanPrompt").value)', submit)
+        self.assertIn("留空逐字沿用默认模板", docs)
+
     def test_commerce_creation_forms_do_not_require_notes(self) -> None:
         page = (ROOT / "portal" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "portal" / "creative.js").read_text(encoding="utf-8")
@@ -19,12 +51,13 @@ class PortalContractTest(unittest.TestCase):
             self.assertNotIn(field, script)
         self.assertIn('id="studioNote"', page)
         self.assertIn('creative-note', script)
-        self.assertIn('/creative.js?v=r119-digital-human-prompt-compiler', page)
-        self.assertIn('/app.js?v=r117-digital-human', page)
+        self.assertIn('/creative.js?v=digital-human-workflow-20261006-r5', page)
+        self.assertIn('/app.js?v=preview-speed-20261006-r8', page)
         self.assertIn('data-open-app="digital-human"', page)
         self.assertIn('id="page-digital-human"', page)
         digital_human = page[page.index('id="page-digital-human"'):page.index('id="page-editor"')]
         self.assertIn('id="digitalHumanAudio"', digital_human)
+        self.assertNotIn('id="digitalHumanEmotion"', digital_human)
         self.assertNotIn('id="digitalHumanScript"', digital_human)
         self.assertNotIn('value="text"', digital_human)
         self.assertIn('/creative.css?v=r112-commerce-depth', page)
@@ -87,8 +120,8 @@ class PortalContractTest(unittest.TestCase):
         self.assertIn("scheduleStudioTaskRefresh();", refresh)
         self.assertNotIn('typeof EventSource === "undefined"', refresh)
         page = (ROOT / "portal" / "index.html").read_text(encoding="utf-8")
-        self.assertIn('/app.js?v=r117-digital-human', page)
-        self.assertIn('/styles.css?v=r113-app-grid', page)
+        self.assertIn('/app.js?v=preview-speed-20261006-r8', page)
+        self.assertIn('/styles.css?v=preview-speed-20261006-r4', page)
         self.assertIn('id="themeToggle"', page)
         self.assertIn('data-overview-record="calls"', page)
         self.assertIn('data-overview-record="ledger"', page)
@@ -97,14 +130,11 @@ class PortalContractTest(unittest.TestCase):
         page = (ROOT / "portal" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "portal" / "creative.js").read_text(encoding="utf-8")
         styles = (ROOT / "portal" / "creative.css").read_text(encoding="utf-8")
-        for icon in (
-            "app-icon-video-create-r95.png",
-            "app-icon-video-remix-r95.png",
-            "app-icon-video-edit-r95.png",
-            "app-icon-image-edit-r95.png",
-        ):
-            self.assertIn(icon, page)
-            self.assertTrue((ROOT / "portal" / icon).is_file())
+        for image in ("video-generation.webp", "commerce-remix.webp", "digital-human.webp", "video-edit.webp", "image-edit.webp", "music-edit.webp"):
+            self.assertIn(f'/app-art/{image}', page)
+            self.assertTrue((ROOT / "portal" / "app-art" / image).is_file())
+        self.assertIn('id="appRecommendForm"', page)
+        self.assertIn('id="appRecommendResults"', page)
         self.assertIn('video.controls = true', script)
         self.assertIn('video.src = url', script)
         self.assertIn('video.load()', script)
@@ -125,14 +155,17 @@ class PortalContractTest(unittest.TestCase):
         self.assertIn('.studio-task-card.is-complete', styles)
         self.assertIn('.studio-result.is-complete .result-progress-rail i', styles)
 
-    def test_selected_completed_task_expands_an_inline_player(self) -> None:
+    def test_selected_completed_task_plays_in_main_stage_with_compact_poster_cards(self) -> None:
         script = (ROOT / "portal" / "app.js").read_text(encoding="utf-8")
-        styles = (ROOT / "portal" / "styles.css").read_text(encoding="utf-8")
-        self.assertIn('studioInlinePreview.className = "task-inline-preview"', script)
-        self.assertIn('selectedCard.appendChild(studioInlinePreview)', script)
-        self.assertIn('playsinline preload="metadata"', script)
+        polish = (ROOT / "portal" / "app-polish.css").read_text(encoding="utf-8")
+        self.assertIn('id="studioResultStage"', (ROOT / "portal" / "index.html").read_text(encoding="utf-8"))
+        self.assertIn('function loadStudioTaskPoster(task, card)', script)
+        self.assertIn('thumb.prepend(image)', script)
+        self.assertIn('video.src = artifact.preview_url || artifact.download_url', script)
+        self.assertIn('grid-template-columns:repeat(3,minmax(0,1fr))', polish)
+        self.assertNotIn('studioInlinePreview', script)
+        self.assertNotIn('selectedCard.appendChild', script)
         self.assertIn('studioSelectedTaskDetail = task', script)
-        self.assertIn('.task-inline-preview.portrait', styles)
 
     def test_video_notes_replace_prompt_titles_without_replacing_prompt_data(self) -> None:
         page = (ROOT / "portal" / "index.html").read_text(encoding="utf-8")
@@ -157,6 +190,7 @@ class PortalContractTest(unittest.TestCase):
     def test_console_groups_overview_apps_and_api_access(self) -> None:
         page = (ROOT / "portal" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "portal" / "app.js").read_text(encoding="utf-8")
+        polish = (ROOT / "portal" / "app-polish.css").read_text(encoding="utf-8")
         self.assertIn('data-page="overview"', page)
         self.assertIn('data-page="apps"', page)
         self.assertIn('data-page="api"', page)
@@ -168,11 +202,15 @@ class PortalContractTest(unittest.TestCase):
         self.assertIn('id="ledgerTable"', overview)
         self.assertNotIn('id="page-ledger"', page)
         apps = page[page.index('id="page-apps"'):page.index('id="page-commerce-remix"')]
-        for tool in ("studio", "commerce-remix", "digital-human", "digital-human2", "editor", "image-edit"):
+        for tool in ("studio", "commerce-remix", "digital-human", "editor", "image-edit", "music"):
             self.assertIn(f'data-open-app="{tool}"', apps)
         self.assertNotIn('data-open-app="remix"', apps)
         self.assertNotIn('data-open-app="remix2"', apps)
-        self.assertIn('7 个创作工具', apps)
+        self.assertIn('6 个工具', apps)
+        self.assertNotIn('data-open-feature-guide', apps)
+        self.assertIn('repeat(auto-fit,minmax(min(100%,230px),1fr))', polish)
+        self.assertIn('content:none !important; display:none !important', polish)
+        self.assertIn('#consoleView #page-studio .task-card-thumb video', polish)
         api = page[page.index('id="page-api"'):page.index('id="communityModal"')]
         self.assertIn('id="apiSectionKeys"', api)
         self.assertIn('id="apiSectionDocs"', api)
@@ -184,8 +222,8 @@ class PortalContractTest(unittest.TestCase):
 
     def test_call_details_and_download_are_separate_actions(self) -> None:
         script = (ROOT / "portal" / "app.js").read_text(encoding="utf-8")
-        self.assertIn(">查看详情</button>", script)
-        self.assertIn('>下载${item.tool === "image_edit" ? "图片" : "视频"}</button>', script)
+        self.assertIn(">查看</button>", script)
+        self.assertIn(">下载</button>", script)
         self.assertNotIn(">详情 / 下载</button>", script)
         self.assertIn("async function downloadTask(id, button)", script)
         self.assertIn('api(`/api/account/tasks/${encodeURIComponent(id)}`)', script)
@@ -219,6 +257,22 @@ class PortalContractTest(unittest.TestCase):
         self.assertIn("def create_1080p", docs)
         self.assertIn("def create_2k", docs)
         self.assertIn("失败全额退回", docs)
+
+    def test_docs_list_only_the_additional_console_creation_apis(self) -> None:
+        docs = (ROOT / "portal" / "docs.html").read_text(encoding="utf-8")
+        section = docs[docs.index('id="app-apis"'):docs.index('id="python"')]
+        for endpoint in (
+            "/api/account/commerce-remix/720p",
+            "/api/account/digital-human/720p",
+            "/api/account/video-edits/720p",
+            "/api/account/image-edits",
+            "/api/account/music",
+        ):
+            self.assertIn(endpoint, section)
+        self.assertIn("控制台 Cookie", section)
+        self.assertIn("清晰度固定为 1M", section)
+        self.assertNotIn("/api/account/videos/", section)
+        self.assertNotIn("/v1/videos/", section)
 
     def test_video_playback_csp_only_allows_configured_storage_origins(self) -> None:
         with patch.dict(

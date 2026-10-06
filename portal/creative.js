@@ -1,8 +1,17 @@
 /* Separate commerce tools, sharing account authentication and task history. */
 (() => {
   let activePage = "", timer = 0, epoch = 0, refreshing = false, refreshRequested = false;
-  const views = {remix: {list: "#remixTasks", tool: "remix"}, remix2: {list: "#remix2Tasks", tool: "remix"}, "commerce-remix": {list: "#commerceRemixTasks", tool: "commerce_remix"}, "digital-human": {list: "#digitalHumanTasks", tool: "digital_human"}, "digital-human2": {list: "#digitalHuman2Tasks", tool: "digital_human2"}, editor: {list: "#editorTasks", tool: "reenact"}, "image-edit": {list: "#imageEditTasks", tool: "image_edit"}};
+  const views = {remix: {list: "#remixTasks", tool: "remix"}, remix2: {list: "#remix2Tasks", tool: "remix"}, "commerce-remix": {list: "#commerceRemixTasks", tool: "commerce_remix"}, "digital-human": {list: "#digitalHumanTasks", tool: "digital_human"}, editor: {list: "#editorTasks", tool: "reenact"}, "image-edit": {list: "#imageEditTasks", tool: "image_edit"}};
   const urls = new Map(), submissions = new Map(), createdTasks = new Map();
+  const posterTasks = new WeakMap();
+  const posterObserver = "IntersectionObserver" in window ? new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const card = entry.target, task = posterTasks.get(card);
+      if (task) loadCreativePoster(task, card);
+      posterObserver.unobserve(card);
+    }
+  }, {rootMargin:"240px 0px"}) : null;
   let editorPricePer15Seconds = 4, editPrice15 = 2, reenactPrice15 = 4;
   let digitalHumanPricePerSegment = 1, digitalHumanAvailable = false;
   const TEMPLATES_ENABLED = false;  // template library is shelved for now
@@ -10,11 +19,17 @@
   function updateDigitalHumanEstimate(seconds) {
     const valid = Number.isFinite(seconds) && seconds >= 1 && seconds <= 60;
     const duration = valid ? seconds : 0;
-    const frames = duration ? Math.ceil(duration * 24) : 0;
-    const segments = duration ? (frames <= 379 ? 1 : Math.ceil(duration / 15)) : 0;
+    const completeWindows = duration ? Math.floor(duration / 15) : 0;
+    const tail = duration - completeWindows * 15;
+    // Match digital_human_render_duration()/digital_human_segment_count() in the API:
+    // a tail shorter than one second after a full 15-second window is discarded.
+    const billableDuration = completeWindows > 0 && tail > 0 && tail < 1
+      ? completeWindows * 15
+      : duration;
+    const segments = duration ? Math.max(1, Math.ceil(billableDuration / 15)) : 0;
     $("#digitalHumanPrice").textContent = valid
-      ? `${duration.toFixed(2)} 秒 · ${segments === 1 ? "一次生成" : `按 15 秒拆为 ${segments} 段`} · ${(segments * digitalHumanPricePerSegment).toFixed(3)} pt；失败退还积分。`
-      : "按视频时长分段计费；生成失败退还积分。";
+      ? `${duration.toFixed(2)} 秒 · 每 15 秒 ${digitalHumanPricePerSegment.toFixed(3)} pt · 本次预计 ${(segments * digitalHumanPricePerSegment).toFixed(3)} pt（${segments} 段）；失败退还积分。`
+      : `每 15 秒 ${digitalHumanPricePerSegment.toFixed(3)} pt，不足 15 秒按 1 段计；生成失败退还积分。`;
     return valid;
   }
   $("#digitalHumanImage").addEventListener("change", event => previewImages(event.currentTarget, $("#digitalHumanImagePreview")));
@@ -26,15 +41,6 @@
     audio.preload = "metadata"; audio.src = url;
     audio.onloadedmetadata = () => { URL.revokeObjectURL(url); const valid = updateDigitalHumanEstimate(audio.duration); $("#digitalHumanAudioInfo").textContent = valid ? `音频 ${audio.duration.toFixed(2)} 秒 · 最终视频保留完整原始上传声音。` : "音频须为 1–60 秒。"; };
     audio.onerror = () => { URL.revokeObjectURL(url); $("#digitalHumanAudioInfo").textContent = "无法读取音频时长，请换用 MP3、WAV、M4A 或 FLAC。"; };
-  });
-  $("#digitalHuman2Image").addEventListener("change", event => previewImages(event.currentTarget, $("#digitalHuman2ImagePreview")));
-  $("#digitalHuman2Audio").addEventListener("change", event => {
-    const file = event.currentTarget.files[0];
-    if (!file) return;
-    const audio = new Audio(), url = URL.createObjectURL(file);
-    audio.preload = "metadata"; audio.src = url;
-    audio.onloadedmetadata = () => { URL.revokeObjectURL(url); const valid = updateDigitalHumanEstimate(audio.duration); $("#digitalHuman2AudioInfo").textContent = valid ? `音频 ${audio.duration.toFixed(2)} 秒 · 最终视频保留完整原始上传声音。` : "音频须为 1–60 秒。"; };
-    audio.onerror = () => { URL.revokeObjectURL(url); $("#digitalHuman2AudioInfo").textContent = "无法读取音频时长，请换用 MP3、WAV、M4A 或 FLAC。"; };
   });
   const remixTemplates = {
     person: {label:"只换人物", roles:["person"]},
@@ -48,7 +54,104 @@
   const remixRoleNames = {person:"人物", product:"商品", scene:"场景"};
   const isActive = task => ["queued", "dispatching", "running"].includes(task.status);
   const safeUrl = value => { try { const url = new URL(value, location.origin); return ["http:", "https:"].includes(url.protocol) ? url.href : ""; } catch { return ""; } };
+  const musicErrorMessage = error => error?.status === 401
+    ? "登录已失效，请重新登录后使用音乐编辑。"
+    : error?.message || "音乐服务暂时不可用，请稍后重试。";
 
+  function galleryStage(target) {
+    const section = target?.closest(".creative-results");
+    if (!section) return null;
+    let stage = section.querySelector(":scope > .creative-gallery-stage");
+    if (!stage) {
+      stage = el("div", undefined, "creative-gallery-stage");
+      stage.innerHTML = '<div class="creative-gallery-head"><strong>最新作品</strong><span>选择下方卡片查看</span></div><div class="creative-gallery-canvas"><div class="creative-gallery-empty">完成的作品会显示在这里</div></div><div class="creative-gallery-actions"></div>';
+      section.insertBefore(stage, target);
+    }
+    return stage;
+  }
+  function addCarouselControls(section, target) {
+    const head = section?.querySelector(".panel-head");
+    if (!head || head.querySelector(".task-carousel-controls")) return;
+    const controls = el("div", undefined, "task-carousel-controls");
+    for (const [label, direction] of [["向左浏览", -1], ["向右浏览", 1]]) {
+      const button = el("button", direction < 0 ? "←" : "→", "task-carousel-button");
+      button.type = "button"; button.setAttribute("aria-label", label);
+      button.onclick = () => target.scrollBy({left: direction * Math.max(target.clientWidth * .8, 260), behavior:"smooth"});
+      controls.append(button);
+    }
+    head.append(controls);
+  }
+  async function previewCreativeTask(task, card, button) {
+    const target = views[activePage] && $(views[activePage].list), stage = galleryStage(target);
+    if (!stage) return;
+    $$(".creative-task.is-selected").forEach(item => item.classList.remove("is-selected"));
+    card.classList.add("is-selected");
+    const canvas = stage.querySelector(".creative-gallery-canvas"), actions = stage.querySelector(".creative-gallery-actions");
+    canvas.innerHTML = '<div class="creative-gallery-empty">正在载入作品…</div>'; actions.replaceChildren(); button.disabled = true;
+    try {
+      const detail = await api(`/api/account/tasks/${encodeURIComponent(task.id)}`);
+      const artifact = detail.artifacts?.find(item => item.media === "video" || item.media === "image") || detail.artifacts?.[0];
+      const originalUrl = safeUrl(artifact?.download_url);
+      const url = safeUrl(artifact?.preview_url) || originalUrl;
+      if (!url || detail.output_expired) throw new Error("作品文件已过期或暂时无法预览");
+      const media = document.createElement(artifact.media === "image" ? "img" : "video");
+      if (artifact.media === "image") {
+        media.alt = detail.note || detail.title || "图片编辑结果";
+        media.src = url;
+        canvas.replaceChildren(media);
+      } else {
+        media.controls = true; media.playsInline = true; media.preload = "metadata";
+        media.setAttribute("controlslist", "nodownload");
+        media.poster = safeUrl(artifact.poster_url);
+        media.src = url;
+        const player = el("div", undefined, "creative-gallery-video-wrap");
+        const play = el("button", "▶　播放视频", "creative-gallery-play");
+        play.type = "button"; play.setAttribute("aria-label", "播放视频");
+        play.onclick = async () => {
+          try {
+            if (media.paused || media.ended) await media.play();
+            else media.pause();
+          } catch (error) {
+            toast("视频暂时无法播放，请稍后重试");
+          }
+        };
+        const syncPlayButton = () => {
+          const paused = media.paused || media.ended;
+          play.hidden = !paused;
+          play.setAttribute("aria-label", paused ? "播放视频" : "暂停视频");
+        };
+        media.addEventListener("play", syncPlayButton);
+        media.addEventListener("pause", syncPlayButton);
+        media.addEventListener("ended", syncPlayButton);
+        media.addEventListener("error", () => toast("视频预览加载失败，请重新选择作品"), {once:true});
+        player.append(media, play);
+        canvas.replaceChildren(player);
+        media.load();
+      }
+      const title = el("span", detail.note || detail.title || detail.prompt_preview || "生成结果", "creative-gallery-caption");
+      const download = el("a", artifact.media === "image" ? "下载图片" : "下载视频", "btn small");
+      download.href = originalUrl; download.target = "_blank"; download.rel = "noopener"; actions.append(title, download);
+      card.closest(".creative-results").dataset.selectedTask = task.id;
+    } catch (error) { canvas.innerHTML = `<div class="creative-gallery-empty">${esc(error.message)}</div>`; }
+    finally { button.disabled = false; }
+  }
+  function loadCreativePoster(task, card) {
+    if (!card || task.status !== "completed" || task.output_expired || card.dataset.posterLoaded) return;
+    const artifact = task.artifacts?.find(item => item.media === "video" || item.media === "image");
+    const url = safeUrl(artifact?.poster_url || artifact?.preview_url);
+    if (!url) return;
+    card.dataset.posterLoaded = "true";
+    const thumb = card.querySelector(".creative-task-thumb");
+    const image = document.createElement("img"); image.src = url; image.alt = ""; image.loading = "lazy"; image.decoding = "async";
+    image.onerror = () => { image.remove(); card.dataset.posterLoaded = ""; };
+    thumb.prepend(image);
+  }
+  function observeCreativePoster(task, card) {
+    if (!card || task.status !== "completed" || task.output_expired) return;
+    posterTasks.set(card, task);
+    if (posterObserver) posterObserver.observe(card);
+    else loadCreativePoster(task, card);
+  }
   function clearUrls(key) { (urls.get(key) || []).forEach(URL.revokeObjectURL); urls.set(key, []); }
   function previewImages(input, target) {
     clearUrls(input.id); target.replaceChildren();
@@ -150,18 +253,22 @@
     try {
       const [value, music] = await Promise.all([
         api("/api/account/creative/config"),
-        api("/api/account/music/status").catch(() => ({available: false, price: 0})),
+        activePage === "music"
+          ? api("/api/account/music/status").catch(error => ({available: false, price: 0, authExpired: error.status === 401}))
+          : Promise.resolve(null),
       ]);
       if (!account) return;
-      const musicAvailable = Boolean(music?.available);
       digitalHumanAvailable = Boolean(value.digital_human?.available);
       if (Number.isFinite(Number(value.digital_human?.price_per_segment))) digitalHumanPricePerSegment = Number(value.digital_human.price_per_segment);
       $("#digitalHumanForm button[type=submit]").disabled = !digitalHumanAvailable;
-      $("#digitalHuman2Form button[type=submit]").disabled = !digitalHumanAvailable;
       $("#digitalHumanPrice").textContent = digitalHumanAvailable
-        ? `音频按约 15 秒一段生成；过短的尾段会并入上一段，每段 ${digitalHumanPricePerSegment} pt，失败退还积分。`
+        ? `每 15 秒 ${digitalHumanPricePerSegment.toFixed(3)} pt，不足 15 秒按 1 段计；不足 1 秒的尾段并入上一段，失败退还积分。`
         : "长视频 GPU 服务暂不可用，请稍后再试。";
-      $("#musicPrice").textContent = musicAvailable ? `每首歌 ${Number(music.price)} pt，成功后扣除。` : "音乐服务暂不可用，请稍后再试。";
+      if (music) $("#musicPrice").textContent = music.available
+        ? `每首歌 ${Number(music.price)} pt，成功后扣除。`
+        : music.authExpired
+          ? "登录已失效，请重新登录后使用音乐编辑。"
+          : "音乐服务暂不可用，请稍后再试。";
       // Keep the submit control usable even while the status probe is delayed
       // or unavailable; the authenticated API returns the precise service
       // error instead of silently leaving the user with a dead button.
@@ -367,20 +474,9 @@
     if (!digitalHumanAvailable) { $("#digitalHumanError").textContent = "长视频 GPU 服务暂不可用，请稍后再试。"; return; }
     if (!audio || audio.size > 300 * 1024 ** 2) { $("#digitalHumanError").textContent = "请上传 300 MB 以内的音频文件"; return; }
     form.append("mode", "audio"); form.append("image", image); form.append("audio", audio);
-    form.append("emotion", $("#digitalHumanEmotion").value.trim());
     form.append("ratio", $("#digitalHumanRatio").value);
+    form.append("prompt", $("#digitalHumanPrompt").value);
     submit(event.currentTarget, form, "/api/account/digital-human/720p", $("#digitalHumanError"));
-  });
-  $("#digitalHuman2Form").addEventListener("submit", event => {
-    event.preventDefault();
-    const form = new FormData(), image = $("#digitalHuman2Image").files[0], audio = $("#digitalHuman2Audio").files[0];
-    $("#digitalHuman2Error").textContent = "";
-    if (!image || image.size > 30 * 1024 ** 2) { $("#digitalHuman2Error").textContent = "请上传 30 MB 以内的一张人物图"; return; }
-    if (!digitalHumanAvailable) { $("#digitalHuman2Error").textContent = "长视频 GPU 服务暂不可用，请稍后再试。"; return; }
-    if (!audio || audio.size > 300 * 1024 ** 2) { $("#digitalHuman2Error").textContent = "请上传 300 MB 以内的音频文件"; return; }
-    form.append("mode", "audio"); form.append("image", image); form.append("audio", audio);
-    form.append("emotion", $("#digitalHuman2Emotion").value.trim()); form.append("ratio", $("#digitalHuman2Ratio").value);
-    submit(event.currentTarget, form, "/api/account/digital-human2/720p", $("#digitalHuman2Error"));
   });
   $("#imageEditForm").addEventListener("submit", async event => {
     event.preventDefault(); const files = editingFiles(), form = new FormData();
@@ -429,20 +525,7 @@
   });
 
   async function openResult(task, card, button) {
-    const region = card.querySelector(".creative-result-media");
-    if (region.children.length) { region.replaceChildren(); button.textContent = "查看结果"; return; }
-    button.disabled = true;
-    try {
-      const detail = await api(`/api/account/tasks/${encodeURIComponent(task.id)}`), artifact = detail.artifacts?.[0];
-      const url = safeUrl(artifact?.download_url); if (!url || detail.output_expired) throw new Error("结果已过期或暂时无法下载");
-      const media = document.createElement(artifact.media === "image" ? "img" : "video");
-      if (artifact.media === "image") media.alt = detail.note || "图片编辑结果";
-      else { media.controls = true; media.playsInline = true; media.preload = "metadata"; }
-      media.src = url; region.append(media);
-      const download = document.createElement("a"); download.href = url; download.target = "_blank"; download.rel = "noopener"; download.className = "btn small"; download.textContent = "下载原文件"; region.append(download);
-      button.textContent = "收起结果";
-    } catch (error) { toast(error.message); }
-    finally { button.disabled = false; }
+    await previewCreativeTask(task, card, button);
   }
   async function openProject(task, card, button) {
     const region = card.querySelector(".creative-project-overview");
@@ -605,7 +688,7 @@
   }
   function makeCard(task) {
     const card = document.createElement("article"); card.dataset.taskId = task.id;
-    card.innerHTML = '<header><h3></h3><span class="task-mini-state"></span></header><p class="creative-task-meta muted"></p><div class="task-mini-progress creative-task-progress" aria-label="任务进度"><i></i></div><p class="creative-task-message"></p><p class="creative-transcript muted" hidden></p><small class="creative-task-cost muted"></small><div class="creative-task-actions"><button type="button" class="btn primary small creative-view">查看结果</button><button type="button" class="btn small creative-project" hidden>查看镜头项目</button><button type="button" class="btn small creative-template" hidden>保存为模板</button><button type="button" class="btn small creative-details">查看描述</button><button type="button" class="btn small creative-note">修改备注</button><button type="button" class="btn small creative-delete">删除记录</button></div><div class="creative-project-overview"></div><div class="creative-result-media"></div>';
+    card.innerHTML = '<button type="button" class="creative-task-thumb creative-view" aria-label="预览此作品"><span>▶</span></button><div class="creative-task-copy"><header><h3></h3><span class="task-mini-state"></span></header><p class="creative-task-meta muted"></p><p class="creative-task-message"></p><div class="task-mini-progress creative-task-progress" aria-label="任务进度"><i></i></div><small class="creative-task-cost muted"></small><div class="creative-task-actions"><button type="button" class="btn small creative-project" hidden>查看镜头项目</button><button type="button" class="btn small creative-template" hidden>保存为模板</button><button type="button" class="btn small creative-details">查看描述</button><button type="button" class="btn small creative-note">修改备注</button><button type="button" class="btn small creative-delete">删除记录</button></div><p class="creative-transcript muted" hidden></p><div class="creative-project-overview"></div></div>';
     card.querySelector(".creative-view").onclick = event => openResult(card._task, card, event.currentTarget);
     card.querySelector(".creative-project").onclick = event => openProject(card._task, card, event.currentTarget);
     card.querySelector(".creative-template").onclick = async event => {
@@ -619,7 +702,7 @@
     };
     card.querySelector(".creative-details").onclick = () => showTask(task.id);
     card.querySelector(".creative-note").onclick = async () => { const note = window.prompt("给这条任务写个备注（最多80字）", card.querySelector("h3").textContent); if (note === null) return; if (note.length > 80) { toast("备注最多80字"); return; } try { await api(`/api/account/tasks/${task.id}/note`, {method:"PATCH", body: JSON.stringify({note})}); await refreshTasks(); } catch (error) { toast(error.message); } };
-    card.querySelector(".creative-delete").onclick = async () => { if (!window.confirm("从列表中删除这条记录？这不会退还已消耗积分。")) return; try { await api(`/api/account/tasks/${task.id}`, {method:"DELETE"}); card.remove(); } catch (error) { toast(error.message); } };
+    card.querySelector(".creative-delete").onclick = async () => { if (!window.confirm("从列表中删除这条记录？这不会退还已消耗积分。")) return; try { await api(`/api/account/tasks/${task.id}`, {method:"DELETE"}); const wasSelected = card.classList.contains("is-selected"); card.remove(); if (wasSelected) { const stage = galleryStage($(views[activePage].list)); stage.querySelector(".creative-gallery-canvas").innerHTML = '<div class="creative-gallery-empty">这条记录已删除</div>'; stage.querySelector(".creative-gallery-actions").replaceChildren(); stage.closest(".creative-results").dataset.selectedTask = ""; } } catch (error) { toast(error.message); } };
     updateCard(task, card); return card;
   }
   async function refreshTasks() {
@@ -637,12 +720,32 @@
         else items.unshift(task);
       }
       const existing = new Map([...target.querySelectorAll(".creative-task")].map(card => [card.dataset.taskId, card]));
+      galleryStage(target);
+      addCarouselControls(target.closest(".creative-results"), target);
       target.querySelector(".empty")?.remove();
       for (const task of items) { let card = existing.get(task.id); if (card) updateCard(task, card); else { card = makeCard(task); target.append(card); } existing.delete(task.id); }
       existing.forEach(card => card.remove());
+      const section = target.closest(".creative-results");
+      if (section.dataset.selectedTask && !items.some(item => item.id === section.dataset.selectedTask)) {
+        section.dataset.selectedTask = "";
+        const stage = galleryStage(target);
+        stage.querySelector(".creative-gallery-canvas").innerHTML = '<div class="creative-gallery-empty">原作品已不可用，选择下方卡片查看其他作品</div>';
+        stage.querySelector(".creative-gallery-actions").replaceChildren();
+      }
       // Insert only new cards in order, without detaching a playing video.
-      items.forEach((task, index) => { const card = target.querySelector(`[data-task-id="${CSS.escape(task.id)}"]`); if (target.children[index] !== card) target.insertBefore(card, target.children[index] || null); });
+      let nextCard = null;
+      [...items].reverse().forEach((task, reverseIndex) => {
+        const card = target.querySelector(`[data-task-id="${CSS.escape(task.id)}"]`);
+        if (card && card !== nextCard) target.insertBefore(card, nextCard);
+        if (card) nextCard = card;
+        if (card?.isConnected) observeCreativePoster(task, card);
+      });
       if (!items.length) target.innerHTML = '<div class="empty">还没有任务。上传素材并提交后，结果会显示在这里。</div>';
+      if (items.length && !section.dataset.selectedTask) {
+        const first = items.find(item => item.status === "completed" && !item.output_expired) || items[0];
+        const card = target.querySelector(`[data-task-id="${CSS.escape(first.id)}"]`);
+        if (card) void previewCreativeTask(first, card, card.querySelector(".creative-view"));
+      }
       if (items.some(isActive)) timer = setTimeout(refreshTasks, 3000);
     } catch (error) { if (version === epoch) { toast(error.message); timer = setTimeout(refreshTasks, 8000); } }
     finally {
@@ -657,22 +760,39 @@
     if (!target || !account) return;
     try {
       const data = await api("/api/account/music/tasks?limit=50");
+      const section = target.closest(".creative-results");
+      let stage = section.querySelector(":scope > .creative-gallery-stage");
+      if (!stage) {
+        stage = el("div", undefined, "creative-gallery-stage");
+        stage.innerHTML = '<div class="creative-gallery-head"><strong>最新作品</strong><span>选择下方卡片试听</span></div><div class="creative-gallery-canvas"><div class="creative-gallery-empty">完成的作品会显示在这里</div></div><div class="creative-gallery-actions"></div>';
+        section.insertBefore(stage, target);
+      }
+      addCarouselControls(section, target);
       target.replaceChildren();
-      if (!data.items?.length) { target.innerHTML = '<div class="empty">上传音频后，任务会显示在这里。</div>'; return; }
+      if (section.dataset.selectedTask && !data.items.some(item => item.id === section.dataset.selectedTask)) {
+        section.dataset.selectedTask = "";
+        stage.querySelector(".creative-gallery-canvas").innerHTML = '<div class="creative-gallery-empty">原作品已不可用，选择下方卡片试听其他作品</div>';
+        stage.querySelector(".creative-gallery-actions").replaceChildren();
+      }
+      if (!data.items?.length) { target.innerHTML = '<div class="empty">上传音频后，任务会显示在这里。</div>'; stage.querySelector(".creative-gallery-canvas").innerHTML = '<div class="creative-gallery-empty">上传音频后，作品会显示在这里</div>'; return; }
       for (const task of data.items) {
         const colorState = task.status === "completed" ? "completed" : task.status === "failed" ? "failed" : task.status === "awaiting_lyrics" ? "queued" : task.status.replace(/^music_/, "");
-        const card = el("article", undefined, `creative-task ${colorState}`);
-        const title = el("h3", task.title || "音乐生成");
+        const card = el("article", undefined, `creative-task music-task-card ${colorState}`);
+        card.dataset.taskId = task.id;
+        const cover = el("button", undefined, "creative-task-thumb music-task-thumb"); cover.type = "button"; cover.setAttribute("aria-label", `预览 ${task.title || "音乐作品"}`); cover.innerHTML = '<span class="music-task-play">♪</span>';
+        const copy = el("div", undefined, "creative-task-copy");
+        const title = el("h3", task.note || task.title || "音乐生成");
+        title.title = task.note || task.title || "音乐生成";
         const state = task.status === "completed" ? "成功" : task.status === "failed" ? "失败" : task.status === "music_queued" || task.status === "queued" ? "排队中" : task.status === "music_dispatching" || task.status === "dispatching" ? "正在启动" : task.status === "awaiting_lyrics" ? "准备中" : "生成中";
         const badge = el("span", state, `task-mini-state ${colorState}`);
         const header = el("header"); header.append(title, badge);
-        const status = el("p", task.message || "");
+        const status = el("p", task.message || "", "creative-task-meta");
         const progress = el("div", undefined, "task-mini-progress creative-task-progress");
         const progressFill = document.createElement("i");
         const progressPercent = task.status === "completed" ? 100 : Math.max(0, Math.min(100, Number(task.progress) || 0));
         progressFill.style.width = `${progressPercent}%`; progress.append(progressFill);
-        card.append(header, progress, status);
-        if (task.error) card.append(el("p", task.error, "form-error"));
+        copy.append(header, progress, status);
+        if (task.error) { const error = el("p", task.error, "music-task-error"); error.title = task.error; copy.append(error); }
         if (task.can_edit_lyrics) {
           const lyrics = el("textarea"); lyrics.rows = 6; lyrics.maxLength = 20000; lyrics.value = task.lyrics || ""; lyrics.setAttribute("aria-label", "确认或修改识别歌词");
           const confirm = el("button", "确认歌词并生成", "btn primary small");
@@ -683,20 +803,64 @@
               await api(`/api/account/music/tasks/${encodeURIComponent(task.id)}/lyrics`, {method:"PATCH", headers:{"Content-Type":"application/json"}, body:JSON.stringify({lyrics:lyrics.value})});
               await api(`/api/account/music/tasks/${encodeURIComponent(task.id)}/generate`, {method:"POST"});
               toast("歌词已确认，开始生成"); refreshMusicTasks();
-            } catch (error) { toast(error.message); confirm.disabled = false; }
+      } catch (error) { toast(musicErrorMessage(error)); confirm.disabled = false; }
           });
-          card.append(lyrics, confirm);
+          copy.append(lyrics, confirm);
         }
+        const mp3 = (task.artifacts || []).find(artifact => /\.mp3$/i.test(artifact.name || "") && artifact.preview_url);
+        cover.disabled = task.status !== "completed" || !mp3;
+        cover.onclick = () => {
+          const canvas = stage.querySelector(".creative-gallery-canvas"), actions = stage.querySelector(".creative-gallery-actions");
+          $$(".music-task-card.is-selected").forEach(item => item.classList.remove("is-selected")); card.classList.add("is-selected");
+          const player = document.createElement("audio"); player.controls = true; player.preload = "none"; player.src = safeUrl(mp3?.preview_url);
+          canvas.replaceChildren(player); actions.replaceChildren(el("span", task.title || "音乐作品", "creative-gallery-caption"));
+          const download = el("a", "下载 MP3", "btn small"); download.href = safeUrl(mp3?.download_url); download.rel = "noopener"; download.download = mp3?.name || "song.mp3"; actions.append(download);
+          section.dataset.selectedTask = task.id;
+        };
         for (const artifact of task.artifacts || []) {
           if (!/\.mp3$/i.test(artifact.name || "")) continue;
-          const player = document.createElement("audio"); player.controls = true; player.preload = "none"; player.src = safeUrl(artifact.preview_url); player.setAttribute("aria-label", `预览 ${task.title || artifact.name}`);
-          const link = el("a", "下载 MP3", "btn small"); link.href = safeUrl(artifact.download_url); link.download = artifact.name || "song.mp3"; link.rel = "noopener";
-          card.append(player, link);
+          card.dataset.previewUrl = safeUrl(artifact.preview_url);
         }
+        const actionsRow = el("div", undefined, "creative-task-actions");
+        const noteButton = el("button", task.note ? "改备注" : "备注", "btn small"); noteButton.type = "button";
+        noteButton.onclick = async () => {
+          const note = window.prompt("给这首音乐写个备注（最多 80 字）", task.note || "");
+          if (note === null) return;
+          if (note.trim().length > 80) { toast("备注最多 80 字"); return; }
+          noteButton.disabled = true;
+          try {
+            await api(`/api/account/tasks/${encodeURIComponent(task.id)}/note`, {method:"PATCH", body:JSON.stringify({note:note.trim()})});
+            toast("备注已保存"); await refreshMusicTasks();
+          } catch (error) { toast(musicErrorMessage(error)); noteButton.disabled = false; }
+        };
+        const deleteButton = el("button", "删除", "btn small music-task-delete"); deleteButton.type = "button";
+        deleteButton.disabled = ["queued", "dispatching", "running", "music_queued", "music_dispatching", "music_running", "awaiting_lyrics"].includes(task.status);
+        deleteButton.title = deleteButton.disabled ? "任务进行中，完成后可删除" : "删除这条记录";
+        deleteButton.onclick = async () => {
+          if (!window.confirm("删除这条音乐记录？删除后不会退还已消耗的积分。")) return;
+          deleteButton.disabled = true;
+          try {
+            await api(`/api/account/tasks/${encodeURIComponent(task.id)}`, {method:"DELETE"});
+            if (section.dataset.selectedTask === task.id) {
+              section.dataset.selectedTask = "";
+              stage.querySelector(".creative-gallery-canvas").innerHTML = '<div class="creative-gallery-empty">选择下方音乐卡片试听</div>';
+              stage.querySelector(".creative-gallery-actions").replaceChildren();
+            }
+            card.remove(); toast("记录已删除"); await refreshMusicTasks();
+          } catch (error) { toast(musicErrorMessage(error)); deleteButton.disabled = false; }
+        };
+        actionsRow.append(noteButton, deleteButton); copy.append(actionsRow);
+        if (section.dataset.selectedTask === task.id) card.classList.add("is-selected");
+        card.append(cover, copy);
         target.append(card);
       }
+      const selected = data.items.find(item => item.id === section.dataset.selectedTask) || data.items.find(item => item.status === "completed") || data.items[0];
+      const selectedCard = target.querySelectorAll(".music-task-card")[data.items.indexOf(selected)];
+      const audioTask = data.items.find(item => item.id === selected?.id);
+      const audioArtifact = audioTask?.artifacts?.find(artifact => /\.mp3$/i.test(artifact.name || "") && artifact.preview_url);
+      if (audioArtifact && !section.dataset.selectedTask) selectedCard?.querySelector(".creative-task-thumb")?.click();
       if (["queued", "dispatching", "running", "music_queued", "music_dispatching", "music_running"].some(s => data.items.some(t => t.status === s))) setTimeout(refreshMusicTasks, 4000);
-    } catch (error) { target.innerHTML = `<div class="empty">${error.message}</div>`; }
+    } catch (error) { target.textContent = ""; target.append(el("div", musicErrorMessage(error), "empty")); }
   }
   function showMusicPending(filename, message = "正在上传音频…", progress = 0) {
     const target = $("#musicTasks");
@@ -728,13 +892,20 @@
       toast("音乐任务已创建");
       document.querySelector('[data-task-id="music-pending"]')?.remove();
       refreshMusicTasks();
-    }).catch(e => { document.querySelector('[data-task-id="music-pending"]')?.remove(); error.textContent = e.message; }).finally(() => { button.disabled = false; });
+    }).catch(e => { document.querySelector('[data-task-id="music-pending"]')?.remove(); error.textContent = musicErrorMessage(e); }).finally(() => { button.disabled = false; });
   });
   $("#musicRefresh")?.addEventListener("click", refreshMusicTasks);
-  document.addEventListener("creative-page", event => { if (event.detail === "music") { window.scrollTo(0, 0); loadConfig(); refreshMusicTasks(); } });
-  document.addEventListener("creative-page", event => { epoch++; activePage = event.detail; clearTimeout(timer); if (views[activePage]) { window.scrollTo(0, 0); loadConfig(); refreshTasks(); if (activePage === "editor") loadTemplates(); } });
+  document.addEventListener("creative-page", event => {
+    epoch++; activePage = event.detail; clearTimeout(timer);
+    if (activePage === "music") { window.scrollTo(0, 0); loadConfig(); refreshMusicTasks(); }
+    else if (views[activePage]) { window.scrollTo(0, 0); loadConfig(); refreshTasks(); if (activePage === "editor") loadTemplates(); }
+  });
   $$("[data-creative-refresh]").forEach(button => button.onclick = () => refreshTasks());
   $("#logoutBtn").addEventListener("click", () => { epoch++; activePage = ""; clearTimeout(timer); submissions.clear(); createdTasks.clear(); Object.values(views).forEach(view => $(view.list).replaceChildren()); urls.forEach((_, key) => clearUrls(key)); $("#remixForm").reset(); $("#remix2Form").reset(); $("#commerceRemixForm").reset(); $("#imageEditForm").reset(); $("#remixSourcePreview").replaceChildren(); $("#remix2SourcePreview").replaceChildren(); $("#commerceRemixSourcePreview").replaceChildren(); $("#editSourcePreview").replaceChildren(); $$(".creative-thumb").forEach(el => el.replaceChildren()); });
-  if (account) { activePage = location.hash.slice(1); if (views[activePage]) { loadConfig(); refreshTasks(); if (activePage === "editor") loadTemplates(); } }
+  if (account) {
+    activePage = location.hash.slice(1);
+    if (activePage === "music") { loadConfig(); refreshMusicTasks(); }
+    else if (views[activePage]) { loadConfig(); refreshTasks(); if (activePage === "editor") loadTemplates(); }
+  }
   updateRemixTemplate();
 })();
