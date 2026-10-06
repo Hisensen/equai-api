@@ -552,13 +552,19 @@ async def create_long_job(
 ) -> int:
     """Submit the isolated latent-linked long-video worker."""
     is_digital_human = worker_input.get("mode") == "digital_human_workflow"
-    image = (
-        os.getenv("GONGJI_DIGITAL_HUMAN_IMAGE", "").strip()
-        if is_digital_human
-        else ""
-    ) or os.getenv("GONGJI_LONG_IMAGE", "").strip()
-    if not image:
-        raise GongjiError("长视频共绩镜像尚未配置")
+    if is_digital_human:
+        # Never fall back to the long-video image here. That fallback is what
+        # sent digital-human jobs to the r38 worker, where 16:9 asked for a
+        # model file the current Comfy build does not list and 9:16 was
+        # rejected outright -- both surfacing only as "GPU 任务失败: Error".
+        # A missing image must fail loudly at submission instead.
+        image = os.getenv("GONGJI_DIGITAL_HUMAN_IMAGE", "").strip()
+        if not image:
+            raise GongjiError("数字人共绩镜像尚未配置（GONGJI_DIGITAL_HUMAN_IMAGE）")
+    else:
+        image = os.getenv("GONGJI_LONG_IMAGE", "").strip()
+        if not image:
+            raise GongjiError("长视频共绩镜像尚未配置")
     timeout = int(os.getenv("GONGJI_LONG_TIMEOUT_SEC", "7200"))
     estimated = int(os.getenv("GONGJI_LONG_ESTIMATED_SEC", "1800"))
     # Digital-human code and its pinned workflow are baked into its dedicated

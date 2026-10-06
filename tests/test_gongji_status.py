@@ -321,3 +321,34 @@ class GongjiStatusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DigitalHumanImageRoutingTest(unittest.TestCase):
+    """A missing digital-human image must fail loudly, never borrow the long-video one.
+
+    The silent fallback is what produced the 2026-10-06 failures: digital-human
+    jobs ran on the r38 long-video worker, where 16:9 requested a model file the
+    current Comfy build does not list and 9:16 was rejected by its 16:9-only
+    validation. Both only ever surfaced as "GPU 任务失败: Error".
+    """
+
+    def _submit(self, mode: str) -> str:
+        import asyncio
+
+        import gongji
+
+        try:
+            asyncio.run(gongji.create_long_job("job", "merchant", {"mode": mode}))
+        except gongji.GongjiError as exc:
+            return str(exc)
+        return ""
+
+    def test_digital_human_refuses_to_borrow_the_long_video_image(self) -> None:
+        with patch.dict(os.environ, {"GONGJI_DIGITAL_HUMAN_IMAGE": "",
+                                     "GONGJI_LONG_IMAGE": "harbor/long:r38"}):
+            self.assertIn("数字人", self._submit("digital_human_workflow"))
+
+    def test_long_video_still_uses_its_own_image(self) -> None:
+        with patch.dict(os.environ, {"GONGJI_DIGITAL_HUMAN_IMAGE": "",
+                                     "GONGJI_LONG_IMAGE": ""}):
+            self.assertIn("长视频", self._submit("long_text"))
