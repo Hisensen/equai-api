@@ -30,17 +30,18 @@ class PortalContractTest(unittest.TestCase):
         self.assertIn("每 15 秒 ${digitalHumanPricePerSegment.toFixed(3)} pt", script)
         self.assertIn("const billableDuration = completeWindows > 0 && tail > 0 && tail < 1", script)
 
-    def test_digital_human_prompt_is_optional_and_uses_literal_h3_template_composition(self) -> None:
+    def test_digital_human_prompt_is_optional_and_is_merged_into_the_h3_template(self) -> None:
         page = (ROOT / "portal" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "portal" / "creative.js").read_text(encoding="utf-8")
         docs = (ROOT / "portal" / "docs.html").read_text(encoding="utf-8")
         digital_human = page[page.index('id="page-digital-human"'):page.index('id="page-editor"')]
         self.assertIn('id="digitalHumanPrompt" maxlength="30000"', digital_human)
-        self.assertIn("按原文追加到 H3 模板的画面描述段落，不经 AI 改写", digital_human)
+        self.assertIn("填写后会与模板整合成一份完整提示词；留空则按原模板生成", digital_human)
         self.assertIn('<option value="16:9">横屏 · 16:9</option>', digital_human)
         self.assertIn('<option value="9:16">竖屏 · 9:16</option>', digital_human)
         submit = script[script.index('$("#digitalHumanForm").addEventListener("submit"'):script.index('$("#imageEditForm").addEventListener("submit"')]
         self.assertIn('form.append("prompt", $("#digitalHumanPrompt").value)', submit)
+        self.assertIn("由 DeepSeek 与 H3 模板整合", docs)
         self.assertIn("留空逐字沿用默认模板", docs)
 
     def test_commerce_creation_forms_do_not_require_notes(self) -> None:

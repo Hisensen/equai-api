@@ -706,7 +706,13 @@ async def create_digital_human(
                    "duration": duration, "source_audio_duration": duration,
                    "ratio": ratio, "quality": 0.9, "megapixels": 1.0,
                    "prompt": workflow_prompt,
-                   "_tool": "digital_human", "_prompt_compiled": True,
+                   # With a direction the scheduler merges it into the template
+                   # through DeepSeek before dispatch; workflow_prompt above is
+                   # the literal-append fallback it starts from. With no
+                   # direction the pinned template is used unchanged and no
+                   # prompt-service call is made.
+                   "_direction": direction,
+                   "_tool": "digital_human", "_prompt_compiled": not direction,
                    "_transfer_backend": "local"}
         now = time.time()
         with transaction() as db:

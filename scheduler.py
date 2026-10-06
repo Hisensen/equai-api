@@ -184,7 +184,8 @@ def _worker_input(row: dict) -> dict:
     payload.pop("_transfer_backend", None)
     for private_key in (
         "_original_prompt", "_prompt_compiled", "_prompt_mode", "_prompt_provider_used",
-        "_tool", "_remix", "_shrink_reference",
+        "_tool", "_remix", "_shrink_reference", "_direction", "_prompt_merge_reason",
+        "_reenact",
     ):
         payload.pop(private_key, None)
     if commerce_depth_worker:
@@ -334,6 +335,17 @@ async def _compile_task_prompt(row: dict) -> dict:
     payload = json.loads(row["payload"] or "{}")
     if payload.get("_prompt_compiled"):
         return row
+    if payload.get("_tool") == "digital_human":
+        import digital_human_prompt
+        merged = await digital_human_prompt.merge_direction(
+            digital_human_prompt.base_prompt(), str(payload.get("_direction") or ""),
+        )
+        result = {"prompt": merged["prompt"], "mode": "Ref2VA",
+                  "provider_used": merged["provider_used"]}
+        if not merged["provider_used"]:
+            log.info("Digital-human prompt merge fell back: %s", merged.get("reason"))
+        payload["_prompt_merge_reason"] = str(merged.get("reason") or "")[:200]
+        return _store_compiled_prompt(row, payload, result)
     inputs = json.loads(row["input_objects"] or "[]")
     if payload.get("_tool") == "remix" and not _is_direct_remix_payload(payload):
         options = payload["_remix"]
@@ -348,6 +360,10 @@ async def _compile_task_prompt(row: dict) -> dict:
             kind=row["kind"], brief=str(payload.get("prompt") or ""),
             duration=float(row["duration"]), ratio=row["ratio"], inputs=inputs,
         )
+    return _store_compiled_prompt(row, payload, result)
+
+
+def _store_compiled_prompt(row: dict, payload: dict, result: dict) -> dict:
     payload["_original_prompt"] = str(payload.get("prompt") or "")
     payload["prompt"] = result["prompt"]
     payload["_prompt_compiled"] = True

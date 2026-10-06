@@ -272,7 +272,7 @@ print(task["id"], task["status"])</code></pre></article>
             <thead><tr><th>应用</th><th>方法与路径</th><th>认证</th><th>关键字段</th></tr></thead>
             <tbody>
               <tr><td>电商复刻</td><td><code>POST /api/account/commerce-remix/720p</code></td><td>控制台 Cookie</td><td><code>kind=reference</code>、<code>videos</code>、可重复的 <code>images</code>、<code>remix_roles</code>。</td></tr>
-              <tr><td>数字人</td><td><code>POST /api/account/digital-human/720p</code></td><td>控制台 Cookie</td><td><code>mode=audio</code>、单个 <code>image</code>、单个 <code>audio</code>；可选 <code>ratio=16:9</code>/<code>9:16</code>（默认 16:9）和 <code>prompt</code>。附加提示词按原文追加到 H3 模板画面描述段，留空逐字沿用默认模板；清晰度固定为 1M。</td></tr>
+              <tr><td>数字人</td><td><code>POST /api/account/digital-human/720p</code></td><td>控制台 Cookie</td><td><code>mode=audio</code>、单个 <code>image</code>、单个 <code>audio</code>；可选 <code>ratio=16:9</code>/<code>9:16</code>（默认 16:9）和 <code>prompt</code>。附加提示词由 DeepSeek 与 H3 模板整合为一份完整的 Ref2VA 提示词，留空逐字沿用默认模板；人物、服装、背景与原声固定跟随上传素材，要求更换这些的内容不会生效；清晰度固定为 1M。</td></tr>
               <tr><td>视频编辑</td><td><code>POST /api/account/video-edits/720p</code></td><td>控制台 Cookie</td><td><code>kind=reference</code>、<code>videos</code>、<code>prompt</code>、<code>edit_mode</code>；可重复的 <code>images</code> 为参考图。</td></tr>
               <tr><td>图片编辑</td><td><code>POST /api/account/image-edits</code></td><td>控制台 Cookie</td><td><code>prompt</code> 必填；可重复的 <code>images</code> 最多 4 张，允许不上传图片而按描述生成。</td></tr>
               <tr><td>音乐编辑</td><td><code>POST /api/account/music</code></td><td>控制台 Cookie</td><td><code>source</code>、<code>style</code>、<code>voice</code>；可选 <code>prompt</code>、<code>lyrics</code>、<code>title</code>。</td></tr>
