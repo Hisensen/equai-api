@@ -190,7 +190,7 @@ def test_music_preview_streams_inline_mp3_for_the_owning_merchant(tmp_path, monk
     assert calls == [("merchant_test", "mus_test")]
     assert response.media_type == "audio/mpeg"
     assert "inline" in response.headers["content-disposition"]
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == "private, max-age=300"
 
 
 def test_music_download_streams_attachment_as_mpeg(tmp_path, monkeypatch) -> None:

@@ -22,6 +22,7 @@ services:
       # Copy the long-video and Hypit analyzer bundles here during migration.
       # When these files exist, workers fetch them from the Guangzhou disk.
       H3_LOCAL_RUNTIME_OVERLAY_PATH: /data/runtime/h3-long-worker.tar.gz
+      H3_LOCAL_DIGITAL_HUMAN_OVERLAY_PATH: /data/runtime/digital-human/h3-digital-human-worker.tar.gz
       H3_LOCAL_HYPIT_ANALYZER_OVERLAY_PATH: /data/runtime/hypit-remix-analyzer.tgz
       H3_PUBLIC_BASE_URL: ${H3_PUBLIC_BASE_URL:?set the public HTTPS base URL}
       H3_TRANSFER_BASE_URL: ${H3_TRANSFER_BASE_URL:?set the public HTTPS transfer URL}

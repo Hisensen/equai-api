@@ -25,3 +25,7 @@ garden-gpt-image-2/
 .tmp_*.py
 admin-board.png
 diary-*.png
+
+# 门户只提供 WebP 版本的应用插画;PNG 原稿体积是 WebP 的 20 倍且无人引用,
+# 留在仓库外以免永久进入 git 历史。
+portal/app-art/*.png

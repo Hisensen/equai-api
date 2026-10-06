@@ -103,8 +103,8 @@ class ReferenceImageDownscaleTest(unittest.TestCase):
             async def submit():
                 return await video_api.create_digital_human(
                     request, merchant, mode="audio", image=image,
-                    emotion="", audio=audio,
-                    ratio="9:16", title="图片缩放测试", idempotency_key=None,
+                    audio=audio,
+                    ratio="16:9", title="图片缩放测试", idempotency_key=None,
                 )
 
             response = asyncio.run(submit())

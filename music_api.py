@@ -32,7 +32,7 @@ class LyricsUpdate(BaseModel):
 
 def _get_task(merchant_id: str, task_id: str):
     with connect() as db:
-        return db.execute("SELECT * FROM merchant_tasks WHERE id=? AND merchant_id=?", (task_id, merchant_id)).fetchone()
+        return db.execute("SELECT * FROM merchant_tasks WHERE id=? AND merchant_id=? AND portal_hidden_at IS NULL", (task_id, merchant_id)).fetchone()
 
 
 def _music_available(_merchant_id: str = "") -> bool:
@@ -136,8 +136,24 @@ async def create_music(
 def list_music(merchant: Annotated[dict, Depends(portal_merchant)], limit: int = 50) -> dict:
     _require_music(str(merchant["id"]))
     with connect() as db:
-        rows = db.execute("SELECT * FROM merchant_tasks WHERE merchant_id=? AND kind='music' ORDER BY created_at DESC LIMIT ?", (merchant["id"], min(max(limit, 1), 100))).fetchall()
-    return {"items": [_music_task_view(row, with_download=True) for row in rows]}
+        rows = db.execute("SELECT * FROM merchant_tasks WHERE merchant_id=? AND kind='music' AND portal_hidden_at IS NULL ORDER BY created_at DESC LIMIT ?", (merchant["id"], min(max(limit, 1), 100))).fetchall()
+    now = time.time()
+    visible = []
+    for row in rows:
+        if row["status"] == "completed":
+            if row["output_expires_at"] and row["output_expires_at"] <= now:
+                continue
+            artifacts = json.loads(row["artifacts"] or "[]")
+            mp3 = next((item for item in artifacts if str(item.get("name") or "").lower().endswith(".mp3")), None)
+            if not mp3:
+                continue
+            if mp3.get("storage") == "local":
+                try:
+                    local_storage.resolve(str(mp3["path"]))
+                except (KeyError, FileNotFoundError, ValueError):
+                    continue
+        visible.append(_music_task_view(row, with_download=True))
+    return {"items": visible}
 
 
 @router.get("/api/account/music/tasks/{task_id}")
@@ -171,7 +187,7 @@ def _music_mp3_path(task_id: str, merchant_id: str) -> Path:
 @router.get("/api/account/music/tasks/{task_id}/preview")
 def music_preview(task_id: str, merchant: Annotated[dict, Depends(portal_merchant)]):
     path = _music_mp3_path(task_id, str(merchant["id"]))
-    return FileResponse(path, media_type="audio/mpeg", filename=path.name, content_disposition_type="inline", headers={"Cache-Control": "private, no-store"})
+    return FileResponse(path, media_type="audio/mpeg", filename=path.name, content_disposition_type="inline", headers={"Cache-Control": "private, max-age=300"})
 
 
 @router.get("/api/account/music/tasks/{task_id}/download")

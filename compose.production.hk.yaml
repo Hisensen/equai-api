@@ -1,7 +1,7 @@
 services:
   api:
     build: .
-    image: equai-api:r96-digital-human-runtime
+    image: equai-api:digital-human-baked-20261006-v2
     container_name: equai-api
     restart: unless-stopped
     env_file:
@@ -67,7 +67,8 @@ services:
       GONGJI_QWEN_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:qwen3vl-4b-int8-remix-r5
       # Isolated latent-linked worker for API-only videos longer than 15 seconds.
       GONGJI_LONG_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r38-4090-720-ref1-5step-io
-      GONGJI_LONG_OVERLAY_KEY: runtime/long-video/r48-digital-human-original-audio/h3-long-worker.tar.gz
+      GONGJI_DIGITAL_HUMAN_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-720-ref1-6step-dh-wf-v1-20261006-ckattn-baked-v4-ratio-prompt
+      GONGJI_LONG_OVERLAY_KEY: runtime/long-video/r47-single-window-45s-airlock/h3-long-worker.tar.gz
       GONGJI_LONG_TIMEOUT_SEC: "7200"
       GONGJI_LONG_ESTIMATED_SEC: "1800"
       H3_LONG_MAX_DURATION_SECONDS: "60"

@@ -1390,3 +1390,5 @@ async def poll_image(row: dict) -> None:
             db.execute("UPDATE assets SET expires_at=? WHERE task_id=? AND role='input'", (now + 86400, row["id"]))
             db.execute("INSERT OR IGNORE INTO assets(id,merchant_id,task_id,role,bucket,object_key,filename,content_type,size_bytes,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (public_id("ast"), row["merchant_id"], row["id"], "output", "local" if artifact.get("storage") == "local" else artifact["bucket"], artifact.get("path") or artifact["key"], "edited.png", "image/png", artifact["size_bytes"], now, expiry))
             settle_task(db, row["id"], "success", note="图片编辑成功")
+        from media_preview import warm_task_previews
+        asyncio.create_task(warm_task_previews(row["merchant_id"], row["id"], [artifact]))
