@@ -211,6 +211,7 @@ class LocalWorkerTransferTest(unittest.TestCase):
 
     def test_hypit_take_callback_uses_parent_task_without_premature_completion(self) -> None:
         self.assertEqual(_parent_task_id("vid_parent-seg01-1"), "vid_parent")
+        self.assertEqual(_parent_task_id("vid_parent-r1-seg01-2"), "vid_parent")
         self.assertEqual(_parent_task_id("vid_parent-take-001"), "vid_parent")
         made = self.merchant.post(
             "/v1/videos/720p",
@@ -220,7 +221,6 @@ class LocalWorkerTransferTest(unittest.TestCase):
         )
         self.assertEqual(made.status_code, 202, made.text)
         task_id = made.json()["id"]
-        child_id = f"{task_id}-take-001"
         with connect() as db:
             row = db.execute("SELECT payload FROM merchant_tasks WHERE id=?", (task_id,)).fetchone()
             payload = json.loads(row["payload"])
@@ -230,25 +230,26 @@ class LocalWorkerTransferTest(unittest.TestCase):
                 ("remote-test", json.dumps(payload), task_id),
             )
 
-        targets = gongji._output_upload_targets(child_id, self.merchant_id, 7200, "local")
-        output_url = urlsplit(targets[0]["url"])
-        video = b"\x00\x00\x00\x18ftypmp42" + b"v" * 4096
-        uploaded = self.merchant.put(
-            output_url.path + "?" + output_url.query,
-            content=video,
-            headers={"Content-Type": "video/mp4"},
-        )
-        self.assertEqual(uploaded.status_code, 204, uploaded.text)
+        for child_id in (f"{task_id}-take-001", f"{task_id}-r1-seg01-2"):
+            targets = gongji._output_upload_targets(child_id, self.merchant_id, 7200, "local")
+            output_url = urlsplit(targets[0]["url"])
+            video = b"\x00\x00\x00\x18ftypmp42" + b"v" * 4096
+            uploaded = self.merchant.put(
+                output_url.path + "?" + output_url.query,
+                content=video,
+                headers={"Content-Type": "video/mp4"},
+            )
+            self.assertEqual(uploaded.status_code, 204, uploaded.text)
 
-        result_target = gongji._result_upload_target(child_id, self.merchant_id, 7200, "local")
-        result_url = urlsplit(result_target["url"])
-        result = {"ok": True, "job_id": child_id, "artifacts": []}
-        result_upload = self.merchant.put(
-            result_url.path + "?" + result_url.query,
-            content=json.dumps(result).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        self.assertEqual(result_upload.status_code, 204, result_upload.text)
+            result_target = gongji._result_upload_target(child_id, self.merchant_id, 7200, "local")
+            result_url = urlsplit(result_target["url"])
+            result = {"ok": True, "job_id": child_id, "artifacts": []}
+            result_upload = self.merchant.put(
+                result_url.path + "?" + result_url.query,
+                content=json.dumps(result).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(result_upload.status_code, 204, result_upload.text)
         with connect() as db:
             state = db.execute("SELECT status FROM merchant_tasks WHERE id=?", (task_id,)).fetchone()["status"]
         self.assertEqual(state, "running")
@@ -327,48 +328,52 @@ class LocalWorkerTransferTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.content, b"runtime overlay")
 
-    def test_direct_upload_grant_and_remote_file_validation(self) -> None:
+    def test_direct_upload_grant_and_local_file_validation(self) -> None:
         grant = {
             "merchant_id": self.merchant_id,
             "field": "images",
             "filename": "subject.png",
             "content_type": "image/png",
             "size_bytes": 13,
-            "key": f"inputs/{self.merchant_id}/staged/unit/subject.png",
+            "key": f"staged/{self.merchant_id}/unit/subject.png",
+            "storage": "local",
             "expires_at": int(time.time()) + 600,
             "signature": "signed",
         }
-        with (
-            patch.dict(os.environ, {"H3_DIRECT_UPLOADS": "1"}),
-            patch.object(video_api, "create_upload_grant", return_value={
-                **grant, "upload_url": "https://upload.invalid/exact-object"
-            }),
-        ):
-            response = self.merchant.post(
-                "/api/account/uploads/presign",
-                json={
-                    "kind": "reference",
-                    "files": [{
-                        "field": "images", "filename": "subject.png",
-                        "content_type": "image/png", "size_bytes": 13,
-                    }],
-                },
-            )
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["items"][0]["key"], grant["key"])
+        content = b"\x89PNG\r\n\x1a\nimage"
+        with tempfile.TemporaryDirectory() as directory:
+            staged_path = Path(directory) / "subject.png"
+            staged_path.write_bytes(content)
+            with (
+                patch.dict(os.environ, {
+                    "H3_DIRECT_UPLOADS": "1", "H3_LOCAL_DIRECT_UPLOADS": "1",
+                    "H3_UPLOAD_BASE_URL": "https://upload.invalid",
+                }),
+                patch.object(video_api, "create_browser_upload_grant", return_value={
+                    **grant, "upload_url": "https://upload.invalid/internal/uploads?token=test"
+                }),
+            ):
+                response = self.merchant.post(
+                    "/api/account/uploads/presign",
+                    json={
+                        "kind": "reference",
+                        "files": [{
+                            "field": "images", "filename": "subject.png",
+                            "content_type": "image/png", "size_bytes": len(content),
+                        }],
+                    },
+                )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["items"][0]["key"], grant["key"])
 
-        with (
-            patch.object(video_api, "verify_upload_grant", return_value=True),
-            patch.object(video_api, "object_metadata", return_value={
-                "size": 13, "content_type": "image/png", "etag": "etag",
-            }),
-            patch.object(video_api, "read_prefix", return_value=b"\x89PNG\r\n\x1a\nimage"),
-            patch.object(video_api, "bucket_name", return_value="private-test-bucket"),
-        ):
-            assets = asyncio.run(video_api._validated_direct_assets(
-                self.merchant_id, "reference", json.dumps([grant])
-            ))
-        self.assertEqual(assets[0]["storage"], "cos")
+            with (
+                patch.object(video_api, "verify_browser_upload_grant", return_value=True),
+                patch.object(video_api, "browser_upload_path", return_value=staged_path),
+            ):
+                assets = asyncio.run(video_api._validated_direct_assets(
+                    self.merchant_id, "reference", json.dumps([grant])
+                ))
+        self.assertEqual(assets[0]["storage"], "local")
         self.assertEqual(assets[0]["field"], "images")
         self.assertEqual(assets[0]["size_bytes"], 13)
 

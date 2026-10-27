@@ -52,10 +52,31 @@ services:
       GONGJI_720_STORAGE_ID: "2593"
       GONGJI_720_GPU_NAME: 4090-48G
       GONGJI_720_GPU_COUNT: "1"
+      GONGJI_720_BACKUP_REGION_NAME: 天津一区
+      GONGJI_720_BACKUP_STORAGE_ID: "2593"
+      GONGJI_720_BACKUP_GPU_NAME: "5090"
+      GONGJI_720_BACKUP_GPU_COUNT: "1"
+      GONGJI_720_BACKUP_CPU_CORES: "16"
+      GONGJI_720_BACKUP_IMAGE: harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-2k-ref1-6step-denoise02-baked-runtime-20261014-v12
+      # Dedicated digital-human failover keeps Zhejiang's baked 4090 worker as
+      # primary and uses its matching Sol-Attn/sm_120 sibling in Tianjin.
+      GONGJI_DIGITAL_HUMAN_BACKUP_REGION_NAME: 天津一区
+      GONGJI_DIGITAL_HUMAN_BACKUP_STORAGE_ID: "2593"
+      GONGJI_DIGITAL_HUMAN_BACKUP_GPU_NAME: "5090"
+      GONGJI_DIGITAL_HUMAN_BACKUP_GPU_COUNT: "1"
+      GONGJI_DIGITAL_HUMAN_BACKUP_CPU_CORES: "16"
+      GONGJI_DIGITAL_HUMAN_BACKUP_IMAGE: harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-720-ref1-6step-dh-wf-v1-20261014-native-v2
       GONGJI_REMIX_720_REGION_NAME: 浙江四区
       GONGJI_REMIX_720_STORAGE_ID: "2593"
       GONGJI_REMIX_720_GPU_NAME: 4090-48G
       GONGJI_REMIX_720_GPU_COUNT: "1"
+      # Commerce has its own 4090 primary and 5090 backup profile.
+      GONGJI_REMIX_720_BACKUP_REGION_NAME: 天津一区
+      GONGJI_REMIX_720_BACKUP_STORAGE_ID: "2593"
+      GONGJI_REMIX_720_BACKUP_GPU_NAME: "5090"
+      GONGJI_REMIX_720_BACKUP_GPU_COUNT: "1"
+      GONGJI_REMIX_720_BACKUP_CPU_CORES: "16"
+      GONGJI_REMIX_720_BACKUP_IMAGE: harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-2k-ref1-6step-denoise02-baked-runtime-20261014-v12
       GONGJI_REMIX_1080_REGION_NAME: 浙江四区
       GONGJI_REMIX_1080_STORAGE_ID: "2593"
       GONGJI_REMIX_1080_GPU_NAME: 4090-48G

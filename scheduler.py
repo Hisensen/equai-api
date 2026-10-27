@@ -46,6 +46,7 @@ REMIX_MAX_CONCURRENCY = max(1, int(os.getenv("H3_REMIX_MAX_CONCURRENCY", "4")))
 # Reenactments run for many minutes and throttle their own GPU jobs per user.
 REENACT_MAX_CONCURRENCY = max(1, int(os.getenv("H3_REENACT_MAX_CONCURRENCY", "10")))
 MUSIC_MAX_CONCURRENCY = max(1, int(os.getenv("H3_MUSIC_MAX_CONCURRENCY", "1")))
+VOICE_CLONE_MAX_CONCURRENCY = max(1, int(os.getenv("H3_VOICE_CLONE_MAX_CONCURRENCY", "1")))
 REMIX_DISPATCH_PARALLELISM = min(
     REMIX_MAX_CONCURRENCY,
     max(1, int(os.getenv("H3_REMIX_DISPATCH_PARALLELISM", "2"))),
@@ -59,6 +60,7 @@ INPUT_RETENTION = int(os.getenv("H3_INPUT_RETENTION_SECONDS", "86400"))
 OUTPUT_RETENTION = int(os.getenv("H3_OUTPUT_RETENTION_SECONDS", "172800"))
 OUTPUT_PREFIX = os.getenv("COS_OUTPUT_PREFIX", "outputs").strip("/")
 MIN_OUTPUT_BYTES = int(os.getenv("H3_MIN_OUTPUT_BYTES", str(64 * 1024)))
+MIN_VOICE_CLONE_OUTPUT_BYTES = 2 * 1024
 BACKUP_INTERVAL = int(os.getenv("H3_BACKUP_INTERVAL", "86400"))
 
 
@@ -79,7 +81,7 @@ def _queue_for(value: str | None) -> str:
         return "standard"
     if tool == "commerce_remix":
         return "remix"
-    return tool if tool in {"remix", "reenact", "music"} else "standard"
+    return tool if tool in {"remix", "reenact", "music", "voice_clone"} else "standard"
 
 
 def _is_remix_payload(value: str | None) -> bool:
@@ -118,9 +120,10 @@ def _workload_for(row: dict, payload: dict) -> str:
 
 
 def _claim_next(queue: str = "standard"):
-    if queue not in {"standard", "remix", "reenact", "music"}:
+    if queue not in {"standard", "remix", "reenact", "music", "voice_clone"}:
         raise ValueError(f"unknown scheduler queue: {queue}")
-    queue_limit = {"remix": REMIX_MAX_CONCURRENCY, "reenact": REENACT_MAX_CONCURRENCY, "music": MUSIC_MAX_CONCURRENCY}.get(queue, MAX_CONCURRENCY)
+    queue_limit = {"remix": REMIX_MAX_CONCURRENCY, "reenact": REENACT_MAX_CONCURRENCY, "music": MUSIC_MAX_CONCURRENCY,
+                   "voice_clone": VOICE_CLONE_MAX_CONCURRENCY}.get(queue, MAX_CONCURRENCY)
     if not local_output_capacity_ok() or not local_transfer_capacity_ok():
         log.error("Local transfer/video storage is below the configured free-space reserve")
         return None
@@ -135,9 +138,9 @@ def _claim_next(queue: str = "standard"):
             return None
         rows = db.execute(
             """SELECT t.* FROM merchant_tasks t JOIN merchants m ON m.id=t.merchant_id
-            WHERE t.status=? AND m.status='active'
+            WHERE t.status=? AND m.status='active' AND t.queued_at<=?
             ORDER BY t.queued_at ASC LIMIT 50""",
-            (claim_status,),
+            (claim_status, time.time()),
         ).fetchall()
         for row in rows:
             if _queue_for(row["payload"]) != queue:
@@ -154,10 +157,11 @@ def _claim_next(queue: str = "standard"):
             account = db.execute("SELECT max_concurrency FROM merchants WHERE id=?", (row["merchant_id"],)).fetchone()
             if owner_running >= min(int(account["max_concurrency"]), MAX_MERCHANT_CONCURRENCY):
                 continue
+            dispatch_message = "正在提交声音任务" if queue == "voice_clone" else "正在整理生成描述"
             changed = db.execute(
-                """UPDATE merchant_tasks SET status=?,progress=10,message='正在整理生成描述'
+                """UPDATE merchant_tasks SET status=?,progress=10,message=?
                 WHERE id=? AND status=?""",
-                (dispatch_status, row["id"], claim_status),
+                (dispatch_status, dispatch_message, row["id"], claim_status),
             )
             if changed.rowcount:
                 return dict(row)
@@ -196,8 +200,13 @@ def _worker_input(row: dict) -> dict:
         payload["_commerce_depth_worker"] = True
         # The public commerce form is a video workflow, but the transformed
         # depth clip enters H3's multi-reference graph (Video 1 + role images).
-        # job_runner only accepts `reference` for that graph.
-        payload["mode"] = "reference"
+        # Keep the latent-HD mode for high-resolution tiers so the worker runs
+        # its refine ladder after the commerce depth preflight.
+        payload["mode"] = (
+            "reference_latent_hd"
+            if payload.get("tier") in {"1080p", "2k"}
+            else "reference"
+        )
     inputs = json.loads(row["input_objects"] or "[]")
     media = []
     for item in inputs:
@@ -339,6 +348,7 @@ async def _compile_task_prompt(row: dict) -> dict:
         import digital_human_prompt
         merged = await digital_human_prompt.merge_direction(
             digital_human_prompt.base_prompt(), str(payload.get("_direction") or ""),
+            merchant_id=row["merchant_id"],
         )
         result = {"prompt": merged["prompt"], "mode": "Ref2VA",
                   "provider_used": merged["provider_used"]}
@@ -354,11 +364,13 @@ async def _compile_task_prompt(row: dict) -> dict:
             row["ratio"], inputs, options["roles"], options["audio"],
             options["analysis"], options.get("keyframes") or [],
             generic_editor=options.get("editor_mode") == "generic",
+            merchant_id=row["merchant_id"],
         )
     else:
         result = await prompt_service.compile_prompt(
             kind=row["kind"], brief=str(payload.get("prompt") or ""),
             duration=float(row["duration"]), ratio=row["ratio"], inputs=inputs,
+            merchant_id=row["merchant_id"],
         )
     return _store_compiled_prompt(row, payload, result)
 
@@ -379,6 +391,35 @@ def _store_compiled_prompt(row: dict, payload: dict, result: dict) -> dict:
     if not changed.rowcount:
         raise prompt_service.PromptServiceError("任务状态已经发生变化")
     return {**row, "payload": encoded}
+
+
+def _requeue_prompt_retry(row: dict, error: prompt_service.PromptServiceError) -> bool:
+    """Keep required prompt integration in front of GPU dispatch, retrying transient provider outages."""
+    payload = json.loads(row["payload"] or "{}")
+    attempt = int(payload.get("_prompt_retry_count") or 0) + 1
+    payload["_prompt_retry_count"] = attempt
+    payload.setdefault("_prompt_retry_started_at", time.time())
+    delay = min(300, 15 * (2 ** min(attempt - 1, 5)))
+    now = time.time()
+    message = "提示词服务繁忙，任务已排队并将自动重试"
+    with connect() as db:
+        changed = db.execute(
+            """UPDATE merchant_tasks SET status='queued',progress=0,message=?,payload=?,
+            queued_at=?,error='' WHERE id=? AND status='dispatching' AND remote_id IS NULL""",
+            (
+                message,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                now + delay,
+                row["id"],
+            ),
+        )
+    if changed.rowcount:
+        log.warning(
+            "Prompt provider temporarily unavailable for %s; retry %s in %ss: %s",
+            row["id"], attempt, delay, str(error)[:240],
+        )
+        return True
+    return False
 
 
 def _transfer_backend(row) -> str:
@@ -414,6 +455,38 @@ async def _dispatch_once(queue: str = "standard") -> bool:
     row = _claim_next(queue)
     if row is None:
         return False
+    if queue == "voice_clone":
+        try:
+            payload = json.loads(row["payload"] or "{}")
+            inputs = json.loads(row["input_objects"] or "[]")
+            transfer_ip = os.getenv("H3_TRANSFER_HOST_IP", "").strip()
+            worker_base = f"https://{transfer_ip}" if transfer_ip else None
+            media = [
+                {"field": item["field"], "filename": item["filename"],
+                 "url": _input_url(row, item, base_url=worker_base)}
+                for item in inputs
+            ]
+            worker_input = {
+                "text": payload["text"],
+                "emotion_weight": payload.get("emotion_weight", 1.0),
+                "media": media,
+                "_output_names": ["speech.mp3"],
+            }
+            task_id = await gongji.create_voice_clone_job(
+                row["id"], row["merchant_id"], worker_input,
+            )
+        except Exception as exc:
+            log.exception("Voice clone dispatch failed for %s", row["id"])
+            _terminal_failure(row["id"], f"声音克隆任务投递失败: {exc}", False)
+            return True
+        with connect() as db:
+            db.execute(
+                """UPDATE merchant_tasks SET status='running',remote_id=?,provider_started=1,
+                started_at=COALESCE(started_at,?),progress=20,message='声音生成中'
+                WHERE id=? AND status='dispatching'""",
+                (str(task_id), time.time(), row["id"]),
+            )
+        return True
     if queue == "music":
         try:
             payload = json.loads(row["payload"] or "{}")
@@ -643,6 +716,12 @@ async def _dispatch_once(queue: str = "standard") -> bool:
         return True
     try:
         row = await _compile_task_prompt(row)
+    except prompt_service.PromptServiceError as exc:
+        if exc.retryable:
+            return not _requeue_prompt_retry(row, exc)
+        log.exception("Prompt middleware failed for %s", row["id"])
+        _terminal_failure(row["id"], "生成描述处理中断，任务尚未投递 GPU", False)
+        return True
     except Exception:  # noqa: BLE001
         log.exception("Prompt middleware failed for %s", row["id"])
         _terminal_failure(row["id"], "生成描述处理中断，任务尚未投递 GPU", False)
@@ -677,7 +756,8 @@ async def _dispatch_once(queue: str = "standard") -> bool:
             )
     except Exception as exc:  # noqa: BLE001
         log.exception("Gongji dispatch failed for %s", row["id"])
-        _terminal_failure(row["id"], f"投递到 GPU 平台失败: {exc}", False)
+        message = str(exc) if isinstance(exc, gongji.NoGpuAvailableError) else f"投递到 GPU 平台失败: {exc}"
+        _terminal_failure(row["id"], message, False)
         return True
     with connect() as db:
         dispatched_payload = json.loads(row["payload"] or "{}")
@@ -699,6 +779,7 @@ async def dispatch_loop(queue: str = "standard") -> None:
     parallelism = (
         REMIX_DISPATCH_PARALLELISM if queue == "remix"
         else MUSIC_MAX_CONCURRENCY if queue == "music"
+        else VOICE_CLONE_MAX_CONCURRENCY if queue == "voice_clone"
         else DISPATCH_PARALLELISM
     )
     while True:
@@ -736,6 +817,9 @@ async def _complete_locked(row, info: dict) -> bool:
     backend = _transfer_backend(row)
     initial_payload = json.loads(row["payload"] or "{}")
     is_music = initial_payload.get("_tool") == "music"
+    is_voice_clone = initial_payload.get("_tool") == "voice_clone"
+    is_audio = is_music or is_voice_clone
+    minimum_output_bytes = MIN_VOICE_CLONE_OUTPUT_BYTES if is_voice_clone else MIN_OUTPUT_BYTES
     is_remix = initial_payload.get("_tool") == "remix" and not _is_direct_remix_payload(initial_payload)
     needs_finalize = _needs_remix_finalize(initial_payload) or is_remix
     analysis_billing = _analysis_billing(row)
@@ -752,19 +836,19 @@ async def _complete_locked(row, info: dict) -> bool:
     objects: list[dict] = []
     if backend == "local":
         artifacts = await asyncio.to_thread(
-            list_task_media if is_music else list_task_videos,
-            row["merchant_id"], row["id"], MIN_OUTPUT_BYTES,
+            list_task_media if is_audio else list_task_videos,
+            row["merchant_id"], row["id"], minimum_output_bytes,
         )
         if not artifacts:
             return False
     else:
         prefix = f'{OUTPUT_PREFIX}/{row["merchant_id"]}/{row["id"]}/'
         objects = await asyncio.to_thread(list_objects, prefix)
-        output_suffixes = {".mp3", ".flac", ".wav", ".m4a"} if is_music else {".mp4"}
+        output_suffixes = {".mp3", ".flac", ".wav", ".m4a"} if is_audio else {".mp4"}
         objects = [
             item for item in objects
             if Path(str(item.get("key") or "")).suffix.lower() in output_suffixes
-            and int(item.get("size") or 0) >= MIN_OUTPUT_BYTES
+            and int(item.get("size") or 0) >= minimum_output_bytes
         ]
         if not objects:
             return False
@@ -782,7 +866,7 @@ async def _complete_locked(row, info: dict) -> bool:
                 {
                     "name": item["key"].rsplit("/", 1)[-1],
                     "bucket": bucket_name(), "key": item["key"],
-                    "media": "audio" if is_music else "video",
+                    "media": "audio" if is_audio else "video",
                     "content_type": {
                         ".mp3": "audio/mpeg", ".flac": "audio/flac",
                         ".wav": "audio/wav", ".m4a": "audio/mp4",
@@ -852,13 +936,13 @@ async def _complete_locked(row, info: dict) -> bool:
                     now + OUTPUT_RETENTION,
                 ),
             )
-        settle_task(db, row["id"], "success", note="音乐生成成功" if is_music else "视频生成成功")
+        settle_task(db, row["id"], "success", note="音频生成成功" if is_audio else "视频生成成功")
         if completed_payload.get("_project", {}).get("project_id"):
             video_projects.mark_run(
                 db, row["id"], status="completed",
                 result={"artifacts": artifacts, "metrics": (completed_payload.get("_remix") or {}).get("metrics", {})},
             )
-    if not is_music:
+    if not is_audio:
         from media_preview import warm_task_previews
         asyncio.create_task(warm_task_previews(row["merchant_id"], row["id"], artifacts))
     if backend == "cos" and local_outputs_enabled():
@@ -965,7 +1049,8 @@ async def _poll_task(row) -> None:
             return
         found = await _complete(row, info)
         if not found and now - (row["started_at"] or row["created_at"]) > MAX_TASK_SECONDS + 120:
-            _terminal_failure(row["id"], "GPU 已结束但未找到输出视频", True, float(info.get("billing") or 0))
+            missing = "GPU 已结束但未找到输出音频" if row["kind"] == "voice_clone" else "GPU 已结束但未找到输出视频"
+            _terminal_failure(row["id"], missing, True, float(info.get("billing") or 0))
     elif info["status"] == "failed":
         if analysis_stage:
             try:

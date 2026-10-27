@@ -10,7 +10,7 @@
   <script src="/theme-init.js?v=r96-theme-price"></script>
   <link rel="stylesheet" href="/styles.css?v=preview-speed-20261006-r4">
   <link rel="stylesheet" href="/creative.css?v=r112-commerce-depth">
-  <link rel="stylesheet" href="/app-polish.css?v=preview-speed-20261006-r12">
+  <link rel="stylesheet" href="/app-polish.css?v=image-edit-studio-20261010-r1">
 </head>
 <body class="auth-mode landing-active">
   <div class="visual-backdrop" aria-hidden="true">
@@ -217,6 +217,9 @@
           <article class="app-launch-card" data-app-id="music" data-app-category="音频">
             <button class="app-launch-open" type="button" data-open-app="music" aria-label="打开音乐编辑"><span class="app-launch-art"><img src="/app-art/music-edit.webp" alt="" loading="lazy"><span class="app-launch-type">音频</span><span class="app-launch-arrow" aria-hidden="true">↗</span></span><span class="app-launch-copy"><strong>音乐编辑</strong><span>调整已有音频的风格或人声</span><span class="app-launch-tags"><i>风格调整</i><i>人声修改</i></span></span></button><button class="app-favorite" type="button" aria-label="收藏音乐编辑" aria-pressed="false">♡</button>
           </article>
+          <article id="voiceCloneAppCard" class="app-launch-card hidden" data-app-id="voice-clone" data-app-category="音频">
+            <button class="app-launch-open" type="button" data-open-app="voice-clone" aria-label="打开声音克隆"><span class="app-launch-art"><img src="/app-art/music-edit.webp" alt="" loading="lazy"><span class="app-launch-type">音频</span><span class="app-launch-arrow" aria-hidden="true">↗</span></span><span class="app-launch-copy"><strong>声音克隆</strong><span>参考一段声音，朗读你的文字</span><span class="app-launch-tags"><i>音色参考</i><i>情绪参考</i></span></span></button><button class="app-favorite" type="button" aria-label="收藏声音克隆" aria-pressed="false">♡</button>
+          </article>
         </div>
         <div id="appsEmptyState" class="apps-empty-state hidden">这个分类下暂时没有收藏的应用。</div>
       </div>
@@ -239,8 +242,13 @@
                 <div class="creative-role"><div class="creative-role-head"><label for="commerceRemixProduct">商品</label><span data-role-status>可选</span></div><input id="commerceRemixProduct" type="file" accept="image/*,.heic,.heif" data-commerce-role="product"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="commerceRemixProduct">清除</button></div>
                 <div class="creative-role"><div class="creative-role-head"><label for="commerceRemixScene">场景</label><span data-role-status>可选</span></div><input id="commerceRemixScene" type="file" accept="image/*,.heic,.heif" data-commerce-role="scene"><div class="creative-thumb"></div><button type="button" class="btn small creative-clear" data-clear="commerceRemixScene">清除</button></div>
               </div>
-              <p class="creative-price">每条视频 1.5 pt，成功后扣除；失败退回积分。</p>
-              <small class="muted">保留原片声音，输出最长 15 秒。请使用常见横屏或竖屏视频。</small>
+              <label for="commerceRemixQuality">输出清晰度</label>
+              <select id="commerceRemixQuality" class="commerce-remix-quality">
+                <option value="720p" data-price="1.5">720p · 1.5 积分</option>
+                <option value="1080p" data-price="2.5">1080p · 2.5 积分</option>
+              </select>
+              <p id="commerceRemixPrice" class="creative-price">每条视频 1.5 积分，成功后扣除；失败退回积分。</p>
+              <small class="muted">保留原片声音、画幅和尺寸，输出最长 15 秒。720p 和 1080p 均支持原画幅。</small>
               <p id="commerceRemixError" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始电商复刻</button>
             </div>
           </form>
@@ -445,8 +453,23 @@
         <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">Image editing</div><h1>图片编辑</h1><p class="muted">上传图片，说清要改哪里；其他部分尽量保留。</p></div></div>
         <div class="creative-shell">
         <form id="imageEditForm" class="panel creative-form">
-          <div class="creative-source"><label for="editImages">参考图片 <span class="muted">可选 · 最多 4 张</span></label><input id="editImages" type="file" accept="image/*,.heic,.heif" multiple><small class="muted">可不上传图片，直接根据文字生成；上传多张时按顺序编号为图一、图二、图三、图四，每张 30 MB 以内。</small><div id="editSourcePreview" class="creative-image-previews"><p class="muted">未上传图片时，将按 Prompt 生成新图。</p></div></div>
-          <div class="creative-controls"><h2>描述你想要的修改</h2><div class="field"><label for="editPrompt">编辑要求</label><textarea id="editPrompt" rows="6" maxlength="8000" required placeholder="例如：把图一人物的上衣换成图二的款式，其他部分尽量保持不变。"></textarea></div><p class="muted">图片编辑可能重绘细节。文字、商标和精密商品结构请下载后核对。</p><p id="editPrice" class="muted">正在读取服务状态…</p><p id="imageEditError" class="form-error" role="alert"></p><button class="btn primary" type="submit" disabled>开始编辑</button></div>
+          <div class="creative-source image-edit-source">
+            <label for="editImages">添加参考图片 <span class="muted">可选 · 最多 10 张</span></label>
+            <label class="image-edit-dropzone" for="editImages" tabindex="0" role="button"><span class="image-edit-drop-icon" aria-hidden="true">＋</span><strong>点击或拖入图片</strong><small>JPG / PNG / WebP / GIF · 单张不超过 20 MB</small></label>
+            <input id="editImages" class="image-edit-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,.heic,.heif" multiple>
+            <div class="image-edit-selected-head"><strong>已选参考图</strong><span id="editImageCount">0 / 10</span></div>
+            <div id="editSourcePreview" class="creative-image-previews image-edit-previews"><p class="muted">不上传图片时，将根据提示词直接生成。</p></div>
+          </div>
+          <div class="creative-controls image-edit-controls">
+            <div class="field"><label for="editPrompt">描述想要的画面</label><textarea id="editPrompt" rows="5" maxlength="20000" required placeholder="例如：保留人物五官和姿势，把服装改成深红色丝绒礼服，电影级柔光，背景干净。"></textarea><small id="editPromptCount" class="muted">0 / 20000</small></div>
+            <div class="field"><label>画面比例</label><div id="editAspectRatios" class="image-edit-ratios" role="group" aria-label="画面比例"></div></div>
+            <div class="image-edit-count-row"><label for="editCount">生成张数</label><output id="editCountValue" for="editCount">1 张</output><input id="editCount" type="range" min="1" max="20" step="1" value="1"></div>
+            <div class="field"><label>选择模型</label><div id="editModels" class="image-edit-models" role="radiogroup" aria-label="图片模型"><p class="muted">正在读取可用模型…</p></div></div>
+            <p class="muted image-edit-hint">可只写提示词进行文生图；上传参考图后自动切换为图生图。结果会保存在你的生成记录中。</p>
+            <p id="editPrice" class="muted creative-price">正在读取服务状态…</p>
+            <p id="imageEditError" class="form-error" role="alert"></p>
+            <button class="btn primary" type="submit">开始生成</button>
+          </div>
         </form>
         <section class="panel creative-results"><div class="panel-head"><h2>编辑记录</h2><button class="btn small" type="button" data-creative-refresh="image-edit">刷新</button></div><div id="imageEditTasks" aria-live="polite"><div class="empty">上传原图，开始你的第一次图片编辑。</div></div></section>
         </div>
@@ -466,6 +489,22 @@
           </div>
         </form>
         <section class="panel creative-results"><div class="panel-head"><h2>编辑任务</h2><button class="btn small" type="button" id="musicRefresh">刷新</button></div><div id="musicTasks"><div class="empty">上传音频后，编辑任务会显示在这里。</div></div></section>
+        </div>
+      </div>
+
+      <div id="page-voice-clone" class="page hidden creative-page">
+        <div class="page-head"><div><button class="page-back" type="button" data-go="apps">← 所有应用</button><div class="eyebrow">Audio · Voice</div><h1>声音克隆</h1><p class="muted">上传一段本人或已获授权的声音作为音色参考，输入文字生成语音。情绪参考可以另传一段音频。</p></div></div>
+        <div class="creative-shell">
+          <form id="voiceCloneForm" class="panel creative-form">
+            <div class="creative-source"><label for="voiceCloneVoice">1 · 音色参考</label><input id="voiceCloneVoice" type="file" accept=".mp3,.wav,.m4a,.flac,.aac,.ogg,audio/*" required><small class="muted">取前 12 秒；单段不超过 50 MB。</small></div>
+            <div class="creative-controls">
+              <div class="field"><label for="voiceCloneEmotion">情绪参考 <span class="muted">可选</span></label><input id="voiceCloneEmotion" type="file" accept=".mp3,.wav,.m4a,.flac,.aac,.ogg,audio/*"></div>
+              <div class="field"><label for="voiceCloneText">2 · 朗读文字</label><textarea id="voiceCloneText" rows="7" maxlength="20000" required placeholder="输入希望用参考音色朗读的文字"></textarea></div>
+              <div class="field"><label for="voiceCloneEmotionWeight">情绪强度 <span class="muted" id="voiceCloneEmotionValue">1.0</span></label><input id="voiceCloneEmotionWeight" type="range" min="0" max="2" step="0.1" value="1"></div>
+              <p id="voiceClonePrice" class="muted"></p><p id="voiceCloneError" class="form-error" role="alert"></p><button class="btn primary" type="submit">开始生成</button>
+            </div>
+          </form>
+          <section class="panel creative-results"><div class="panel-head"><h2>生成记录</h2><button class="btn small" type="button" id="voiceCloneRefresh">刷新</button></div><div id="voiceCloneTasks" aria-live="polite"><div class="empty">提交后，生成记录会显示在这里。</div></div></section>
         </div>
       </div>
 
@@ -525,9 +564,10 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=preview-speed-20261006-r8" defer></script>
+  <script src="/app.js?v=tencent-direct-only-20261007-r11" defer></script>
   <script src="/local-preview.js?v=account-overview-apps-20261005-r3" defer></script>
-  <script src="/creative.js?v=direct-upload-20261006-r6" defer></script>
+  <script src="/creative.js?v=commerce-auto-crop-20261024-r1" defer></script>
+  <script src="/voice-clone.js?v=20261021-r1" defer></script>
   <script type="module" src="/login-orbit/entry.js?v=ui9-orbit-20261005-r3"></script>
 </body>
 </html>

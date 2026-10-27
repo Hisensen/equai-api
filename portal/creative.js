@@ -1,6 +1,6 @@
 /* Separate commerce tools, sharing account authentication and task history. */
 (() => {
-  let activePage = "", timer = 0, epoch = 0, refreshing = false, refreshRequested = false;
+  let activePage = "", timer = 0, epoch = 0, refreshing = false, refreshRequested = false, taskRefreshUntil = 0;
   const views = {remix: {list: "#remixTasks", tool: "remix"}, remix2: {list: "#remix2Tasks", tool: "remix"}, "commerce-remix": {list: "#commerceRemixTasks", tool: "commerce_remix"}, "digital-human": {list: "#digitalHumanTasks", tool: "digital_human"}, editor: {list: "#editorTasks", tool: "reenact"}, "image-edit": {list: "#imageEditTasks", tool: "image_edit"}};
   const urls = new Map(), submissions = new Map(), createdTasks = new Map();
   const posterTasks = new WeakMap();
@@ -14,6 +14,7 @@
   }, {rootMargin:"240px 0px"}) : null;
   let editorPricePer15Seconds = 4, editPrice15 = 2, reenactPrice15 = 4;
   let digitalHumanPricePerSegment = 1, digitalHumanAvailable = false;
+  let imageEditConfig = null, imageEditModel = "gpt-image-2", imageEditAspectRatio = "auto";
   const TEMPLATES_ENABLED = false;  // template library is shelved for now
   const editorMode = () => "reenact";  // one pipeline: the system decides from the Prompt
   function updateDigitalHumanEstimate(seconds) {
@@ -54,6 +55,15 @@
   const remixRoleNames = {person:"人物", product:"商品", scene:"场景"};
   const isActive = task => ["queued", "dispatching", "running"].includes(task.status);
   const safeUrl = value => { try { const url = new URL(value, location.origin); return ["http:", "https:"].includes(url.protocol) ? url.href : ""; } catch { return ""; } };
+  function createIdempotencyKey() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    const bytes = new Uint8Array(16);
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") crypto.getRandomValues(bytes);
+    else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
   const musicErrorMessage = error => error?.status === 401
     ? "登录已失效，请重新登录后使用音乐编辑。"
     : error?.message || "音乐服务暂时不可用，请稍后重试。";
@@ -68,6 +78,34 @@
       section.insertBefore(stage, target);
     }
     return stage;
+  }
+  function fitGalleryVideo(canvas, player, media) {
+    canvas._creativeVideoResizeObserver?.disconnect();
+    if (canvas._creativeVideoResizeHandler) window.removeEventListener("resize", canvas._creativeVideoResizeHandler);
+    const fit = () => {
+      const sourceWidth = media.videoWidth, sourceHeight = media.videoHeight;
+      const stageWidth = canvas.parentElement?.clientWidth || canvas.clientWidth;
+      const maxHeight = Number.parseFloat(getComputedStyle(canvas).maxHeight) || canvas.clientHeight;
+      if (!sourceWidth || !sourceHeight || !stageWidth || !maxHeight) return;
+      const scale = Math.min(stageWidth / sourceWidth, maxHeight / sourceHeight);
+      canvas.style.width = `${Math.floor(sourceWidth * scale)}px`;
+      canvas.style.height = `${Math.floor(sourceHeight * scale)}px`;
+      canvas.style.minHeight = "0";
+      canvas.style.maxHeight = "none";
+      canvas.style.aspectRatio = `${sourceWidth} / ${sourceHeight}`;
+      canvas.style.marginInline = "auto";
+      player.style.width = "100%";
+      player.style.height = "100%";
+    };
+    media.addEventListener("loadedmetadata", fit);
+    if (media.readyState >= 1) fit();
+    if (window.ResizeObserver) {
+      canvas._creativeVideoResizeObserver = new ResizeObserver(fit);
+      canvas._creativeVideoResizeObserver.observe(canvas.parentElement || canvas);
+    } else {
+      canvas._creativeVideoResizeHandler = fit;
+      window.addEventListener("resize", canvas._creativeVideoResizeHandler, {passive:true});
+    }
   }
   function addCarouselControls(section, target) {
     const head = section?.querySelector(".panel-head");
@@ -87,18 +125,58 @@
     $$(".creative-task.is-selected").forEach(item => item.classList.remove("is-selected"));
     card.classList.add("is-selected");
     const canvas = stage.querySelector(".creative-gallery-canvas"), actions = stage.querySelector(".creative-gallery-actions");
+    canvas._creativeVideoResizeObserver?.disconnect();
+    canvas._creativeVideoResizeObserver = null;
+    if (canvas._creativeVideoResizeHandler) window.removeEventListener("resize", canvas._creativeVideoResizeHandler);
+    canvas._creativeVideoResizeHandler = null;
+    canvas.classList.remove("is-image-preview");
+    for (const property of ["width", "height", "min-height", "max-height", "aspect-ratio", "margin-inline"]) canvas.style.removeProperty(property);
     canvas.innerHTML = '<div class="creative-gallery-empty">正在载入作品…</div>'; actions.replaceChildren(); button.disabled = true;
     try {
       const detail = await api(`/api/account/tasks/${encodeURIComponent(task.id)}`);
-      const artifact = detail.artifacts?.find(item => item.media === "video" || item.media === "image") || detail.artifacts?.[0];
+      const artifacts = Array.isArray(detail.artifacts)
+        ? detail.artifacts.filter(item => item && typeof item === "object")
+        : [];
+      const artifact = artifacts.find(item => item.media === "video" || item.media === "image") || artifacts[0];
+      if (!artifact || !["video", "image"].includes(artifact.media)) {
+        throw new Error(detail.status === "failed"
+          ? (detail.error || detail.message || "任务失败，没有可预览的作品")
+          : "任务暂时没有可播放的作品文件");
+      }
       const originalUrl = safeUrl(artifact?.download_url);
       const url = safeUrl(artifact?.preview_url) || originalUrl;
-      if (!url || detail.output_expired) throw new Error("作品文件已过期或暂时无法预览");
+      if (detail.output_expired) throw new Error("作品文件已过期，请重新生成");
+      if (!url) throw new Error("作品文件暂时无法预览，请刷新后重试");
       const media = document.createElement(artifact.media === "image" ? "img" : "video");
       if (artifact.media === "image") {
+        canvas.classList.add("is-image-preview");
         media.alt = detail.note || detail.title || "图片编辑结果";
         media.src = url;
         canvas.replaceChildren(media);
+        const imageArtifacts = artifacts.filter(item => item.media === "image");
+        if (imageArtifacts.length > 1) {
+          canvas.classList.add("is-multiple-image-preview");
+          const strip = el("div", undefined, "image-edit-output-strip");
+          imageArtifacts.forEach((item, index) => {
+            const thumb = el("button", undefined, "image-edit-output-thumb"); thumb.type = "button";
+            thumb.setAttribute("aria-label", `查看生成图片 ${index + 1}`);
+            thumb.setAttribute("aria-pressed", String(index === 0));
+            const imageUrl = safeUrl(item.preview_url) || safeUrl(item.download_url);
+            const image = document.createElement("img"); image.src = imageUrl; image.alt = `生成图片 ${index + 1}`; image.loading = "lazy";
+            thumb.append(image); thumb.addEventListener("click", () => {
+              if (!imageUrl) return;
+              media.src = imageUrl;
+              media.alt = `生成图片 ${index + 1}`;
+              for (const other of strip.querySelectorAll("button")) {
+                const selected = other === thumb;
+                other.setAttribute("aria-current", String(selected));
+                other.setAttribute("aria-pressed", String(selected));
+              }
+            });
+            thumb.setAttribute("aria-current", String(index === 0)); strip.append(thumb);
+          });
+          canvas.append(strip);
+        }
       } else {
         media.controls = true; media.playsInline = true; media.preload = "metadata";
         media.setAttribute("controlslist", "nodownload");
@@ -126,11 +204,21 @@
         media.addEventListener("error", () => toast("视频预览加载失败，请重新选择作品"), {once:true});
         player.append(media, play);
         canvas.replaceChildren(player);
+        fitGalleryVideo(canvas, player, media);
         media.load();
       }
       const title = el("span", detail.note || detail.title || detail.prompt_preview || "生成结果", "creative-gallery-caption");
-      const download = el("a", artifact.media === "image" ? "下载图片" : "下载视频", "btn small");
-      download.href = originalUrl; download.target = "_blank"; download.rel = "noopener"; actions.append(title, download);
+      actions.append(title);
+      const imageArtifacts = artifacts.filter(item => item.media === "image");
+      if (artifact.media === "image" && imageArtifacts.length > 1) {
+        imageArtifacts.forEach((item, index) => {
+          const link = el("a", `下载 ${index + 1}`, "btn small"), href = safeUrl(item.download_url);
+          if (href) { link.href = href; link.target = "_blank"; link.rel = "noopener"; actions.append(link); }
+        });
+      } else {
+        const download = el("a", artifact.media === "image" ? "下载图片" : "下载视频", "btn small");
+        download.href = originalUrl; download.target = "_blank"; download.rel = "noopener"; actions.append(download);
+      }
       card.closest(".creative-results").dataset.selectedTask = task.id;
     } catch (error) { canvas.innerHTML = `<div class="creative-gallery-empty">${esc(error.message)}</div>`; }
     finally { button.disabled = false; }
@@ -183,41 +271,101 @@
   $("#remixTemplate").addEventListener("change", updateRemixTemplate);
   $$('[data-remix-role]').forEach(input => input.addEventListener("change", () => { previewImages(input, input.parentElement.querySelector(".creative-thumb")); updateRemixTemplate(); }));
   function editingFiles() { return [...$("#editImages").files]; }
-  async function compactEditImage(file) {
-    if (file.type !== "image/png" || file.size < 5 * 1024 ** 2 || typeof createImageBitmap !== "function") return file;
-    let bitmap;
-    try {
-      bitmap = await createImageBitmap(file, {imageOrientation:"from-image"});
-      const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height));
-      const sample = document.createElement("canvas");
-      sample.width = Math.max(1, Math.round(bitmap.width * scale)); sample.height = Math.max(1, Math.round(bitmap.height * scale));
-      const sampleContext = sample.getContext("2d");
-      sampleContext.drawImage(bitmap, 0, 0, sample.width, sample.height);
-      const pixels = sampleContext.getImageData(0, 0, sample.width, sample.height).data;
-      let transparent = 0;
-      for (let i = 3; i < pixels.length; i += 4) if (pixels[i] < 250) transparent++;
-      sample.width = sample.height = 0;
-      if (transparent > pixels.length / 400) return file; // More than 1% of pixels need transparency.
-      const canvas = document.createElement("canvas"); canvas.width = bitmap.width; canvas.height = bitmap.height;
-      const context = canvas.getContext("2d", {alpha:false}); context.fillStyle = "#fff"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(bitmap, 0, 0);
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .95));
-      canvas.width = canvas.height = 0;
-      if (!blob || blob.size >= file.size) return file;
-      return new File([blob], file.name.replace(/\.png$/i, ".jpg"), {type:"image/jpeg", lastModified:file.lastModified});
-    } catch { return file; }
-    finally { bitmap?.close?.(); }
+  function renderImageEditOptions(value) {
+    imageEditConfig = value || null;
+    const models = Array.isArray(value?.models) ? value.models : [];
+    const modelTarget = $("#editModels"); modelTarget.replaceChildren();
+    if (!models.length) modelTarget.append(el("p", "图片模型暂不可用，请刷新后重试。", "muted"));
+    if (!models.some(item => item.id === imageEditModel)) imageEditModel = models[0]?.id || "gpt-image-2";
+    for (const model of models) {
+      const card = el("button", undefined, "image-edit-model-card"); card.type = "button";
+      card.setAttribute("role", "radio"); card.setAttribute("aria-checked", String(model.id === imageEditModel));
+      card.dataset.model = model.id;
+      const copy = el("span", undefined, "image-edit-model-copy");
+      copy.append(el("strong", model.display_name || model.id), el("small", model.description || ""));
+      const price = el("span", undefined, "image-edit-model-price");
+      const sitePrice = Number(model.site_price_points);
+      price.append(el("strong", `${Number.isFinite(sitePrice) ? sitePrice.toFixed(2) : "—"} pt`), el("small", "积分 / 张"));
+      card.append(copy, price);
+      card.addEventListener("click", () => {
+        imageEditModel = model.id;
+        for (const item of modelTarget.querySelectorAll(".image-edit-model-card")) {
+          item.setAttribute("aria-checked", String(item.dataset.model === imageEditModel));
+        }
+        updateImageEditEstimate();
+      });
+      modelTarget.append(card);
+    }
+    const ratioTarget = $("#editAspectRatios"); ratioTarget.replaceChildren();
+    const ratios = Array.isArray(value?.aspect_ratios) ? value.aspect_ratios : ["auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "5:4", "16:9", "9:16", "21:9", "9:21"];
+    if (!ratios.includes(imageEditAspectRatio)) imageEditAspectRatio = "auto";
+    for (const ratio of ratios) {
+      const button = el("button", ratio === "auto" ? "自动" : ratio, "image-edit-ratio");
+      button.type = "button"; button.setAttribute("aria-pressed", String(ratio === imageEditAspectRatio));
+      button.addEventListener("click", () => {
+        imageEditAspectRatio = ratio;
+        for (const item of ratioTarget.querySelectorAll(".image-edit-ratio")) item.setAttribute("aria-pressed", String(item.dataset.ratio === ratio));
+        button.dataset.ratio = ratio; updateImageEditEstimate();
+      });
+      button.dataset.ratio = ratio; ratioTarget.append(button);
+    }
+    $("#editCount").max = String(value?.max_count || 20);
+    $("#editImages").dataset.maxImages = String(value?.max_reference_images || 10);
+    $("#editPrompt").maxLength = Number(value?.max_prompt_chars || 20000);
+    updateImageEditEstimate();
+  }
+  function updateImageEditEstimate() {
+    const count = Math.max(1, Number($("#editCount").value) || 1);
+    const model = imageEditConfig?.models?.find(item => item.id === imageEditModel);
+    $("#editCountValue").textContent = `${count} 张`;
+    if (!imageEditConfig) return;
+    const sitePrice = Number(model?.site_price_points);
+    $("#editPrice").textContent = Number.isFinite(sitePrice)
+      ? `本次预计冻结 ${(sitePrice * count).toFixed(3)} pt（${model?.tier || "所选模型"} ${sitePrice.toFixed(2)} pt/张）；失败张数退分。`
+      : "图片编辑暂不可用，请稍后重试。";
   }
   function previewEditing() {
     const target = $("#editSourcePreview"); clearUrls("editing"); target.replaceChildren();
-    editingFiles().forEach((file, index) => {
+    const files = editingFiles();
+    $("#editImageCount").textContent = `${files.length} / ${Number($("#editImages").dataset.maxImages || 10)}`;
+    files.forEach((file, index) => {
       const url = URL.createObjectURL(file); urls.get("editing").push(url);
       const figure = document.createElement("figure"), image = document.createElement("img"), caption = document.createElement("figcaption");
       image.src = url; image.alt = file.name;
       caption.textContent = `图${index + 1} · ${file.name}`;
-      figure.append(image, caption); target.append(figure);
+      const remove = el("button", "移除", "image-edit-remove"); remove.type = "button";
+      remove.setAttribute("aria-label", `移除参考图 ${file.name}`);
+      remove.addEventListener("click", () => {
+        const data = new DataTransfer(); files.forEach((item, itemIndex) => { if (itemIndex !== index) data.items.add(item); });
+        $("#editImages").files = data.files; previewEditing();
+      });
+      figure.append(image, caption, remove); target.append(figure);
     });
+    if (!files.length) target.append(el("p", "不上传图片时，将根据提示词直接生成。", "muted"));
   }
-  $("#editImages").addEventListener("change", previewEditing);
+  $("#editImages").addEventListener("change", () => {
+    const files = editingFiles(), max = Number($("#editImages").dataset.maxImages || 10);
+    if (files.length > max) { $("#imageEditError").textContent = `参考图片最多 ${max} 张`; $("#editImages").value = ""; previewEditing(); return; }
+    const oversized = files.find(file => file.size > 20 * 1024 ** 2);
+    if (oversized) { $("#imageEditError").textContent = `“${oversized.name}”超过 20 MB`; $("#editImages").value = ""; previewEditing(); return; }
+    $("#imageEditError").textContent = ""; previewEditing();
+  });
+  $("#editPrompt").addEventListener("input", () => { $("#editPromptCount").textContent = `${$("#editPrompt").value.length} / 20000`; });
+  $("#editCount").addEventListener("input", updateImageEditEstimate);
+  const editDrop = $(".image-edit-dropzone");
+  editDrop.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); $("#editImages").click(); } });
+  for (const eventName of ["dragenter", "dragover"]) editDrop.addEventListener(eventName, event => { event.preventDefault(); editDrop.classList.add("is-dragging"); });
+  for (const eventName of ["dragleave", "drop"]) editDrop.addEventListener(eventName, event => { event.preventDefault(); editDrop.classList.remove("is-dragging"); });
+  editDrop.addEventListener("drop", event => {
+    const incoming = [...(event.dataTransfer?.files || [])];
+    const current = editingFiles(), max = Number($("#editImages").dataset.maxImages || 10);
+    const combined = [...current, ...incoming].filter(file => file.type.startsWith("image/"));
+    if (combined.length > max) { $("#imageEditError").textContent = `参考图片最多 ${max} 张`; return; }
+    const oversized = combined.find(file => file.size > 20 * 1024 ** 2);
+    if (oversized) { $("#imageEditError").textContent = `“${oversized.name}”超过 20 MB`; return; }
+    const data = new DataTransfer(); combined.forEach(file => data.items.add(file)); $("#editImages").files = data.files;
+    $("#imageEditError").textContent = ""; previewEditing();
+  });
   $$("[data-clear]").forEach(button => button.addEventListener("click", () => { const input = document.getElementById(button.dataset.clear); input.value = ""; input.dispatchEvent(new Event("change")); }));
   $("#remixVideo").addEventListener("change", event => {
     clearUrls("remixVideo"); const target = $("#remixSourcePreview"); target.replaceChildren();
@@ -273,8 +421,12 @@
       // or unavailable; the authenticated API returns the precise service
       // error instead of silently leaving the user with a dead button.
       $("#musicForm button[type=submit]").disabled = false;
-      $("#editPrice").textContent = value.image_edit.available ? `每张 ${value.image_edit.price} pt，成功后扣分，失败释放冻结积分。` : "图片编辑正在配置中，暂未开放提交。";
-      $("#imageEditForm button[type=submit]").disabled = !value.image_edit.available;
+      renderImageEditOptions(value.image_edit);
+      $("#editPrice").textContent = value.image_edit.available ? $("#editPrice").textContent : "图片编辑正在配置中，暂未开放提交。";
+      // A failed config probe must not leave the form looking clickable while
+      // the browser silently ignores submit. The create route reports the
+      // current service status and a useful error to the user.
+      $("#imageEditForm button[type=submit]").disabled = false;
       for (const option of $("#remixQuality").options) {
         const price = value.remix?.prices?.[option.value];
         if (Number.isFinite(Number(price))) option.textContent = `${option.value === "2k" ? "2K" : option.value.toUpperCase()} · ${Number(price)} pt`;
@@ -293,7 +445,7 @@
       } else if (editorPrices) {
         $("#editorVideoInfo").textContent = `按时长计费：每 15 秒 ${editorPricePer15Seconds} pt，不足 15 秒按一档计。`;
       }
-    } catch (error) { $("#editPrice").textContent = error.message; $("#imageEditForm button[type=submit]").disabled = true; }
+    } catch (error) { $("#editPrice").textContent = error.message; $("#imageEditForm button[type=submit]").disabled = false; }
   }
 
   async function recoverSubmission(key) {
@@ -310,8 +462,13 @@
 
   function showCreatedTask(task, page) {
     const view = views[page];
-    if (!account || !task?.id || !view?.tool.split(",").includes(task.tool)) return;
+    if (!account || !task?.id || !view) return;
+    // The submit response is authoritative for the page that created it. Some
+    // older worker paths return their internal `remix` tool name here.
+    if (page === "commerce-remix") task = {...task, tool: "commerce_remix"};
+    else if (!view.tool.split(",").includes(task.tool)) return;
     createdTasks.set(task.id, task);
+    taskRefreshUntil = Date.now() + 90_000;
     const target = $(view.list);
     target.querySelector(".empty")?.remove();
     const card = target.querySelector(`[data-task-id="${CSS.escape(task.id)}"]`) || makeCard(task);
@@ -334,25 +491,30 @@
     card.querySelector("i").style.width = `${Math.max(4, Math.min(100, progress || 4))}%`;
   }
 
-  async function submit(formElement, form, path, errorElement, directUpload = false) {
+  async function submit(formElement, form, path, errorElement, directUpload = false, activityLabel = "") {
     const button = formElement.querySelector('[type="submit"]'), label = button.textContent;
     if (button.disabled) return;
-    button.disabled = true; errorElement.textContent = "";
+    button.disabled = true; button.textContent = activityLabel || label; errorElement.textContent = "";
     // Retain an idempotency key for uncertain retries; editing any input produces a new key.
     const fingerprint = JSON.stringify([...form.entries()].map(([key, value]) => [key, value instanceof File ? [value.name, value.size, value.lastModified] : value]));
     let request = submissions.get(formElement.id);
-    if (!request || request.fingerprint !== fingerprint) { request = {fingerprint, key: crypto.randomUUID()}; submissions.set(formElement.id, request); }
+    if (!request || request.fingerprint !== fingerprint) { request = {fingerprint, key: createIdempotencyKey()}; submissions.set(formElement.id, request); }
     const page = activePage;
     try {
       const firstFile = [...form.values()].find(value => value instanceof File && value.name);
       showCreativePending(page, firstFile?.name || "数字人视频", "正在准备素材…", 4);
       const submissionForm = directUpload
-        ? await prepareStudioDirectUpload(form, () => {})
+        ? await prepareStudioDirectUpload(form, progress => {
+            showCreativePending(page, firstFile?.name || "数字人视频", `素材直传 ${progress}%…`, progress);
+            if (activityLabel) button.textContent = `正在上传素材 ${progress}%…`;
+          })
         : form;
       showCreativePending(page, firstFile?.name || "数字人视频", "正在上传素材…", 4);
+      if (activityLabel) button.textContent = "正在创建任务…";
       toast("正在上传素材并创建任务…");
       const task = await uploadForm(path, submissionForm, {"Idempotency-Key": request.key}, phase => {
         showCreativePending(page, firstFile?.name || "数字人视频", phase.phase === "creating" ? "正在创建任务…" : `正在上传素材 ${phase.progress ?? 0}%`, phase.progress ?? 4);
+        if (activityLabel) button.textContent = phase.phase === "creating" ? "正在创建任务…" : `正在上传素材 ${phase.progress ?? 0}%…`;
       });
       submissions.delete(formElement.id);
       document.querySelector('[data-task-id="creative-pending"]')?.remove();
@@ -361,6 +523,7 @@
       await refreshTasks(); await refreshAccount().catch(() => null);
     } catch (error) {
       document.querySelector('[data-task-id="creative-pending"]')?.remove();
+      if (activityLabel) toast(error.message);
       // Validation/signing failures are deterministic and must be shown as-is;
       // only an interrupted final POST needs idempotent recovery.
       const recoverable = /连接中断|超时|上传响应中断|请求失败 \(5\d\d\)/.test(error.message);
@@ -440,11 +603,15 @@
     const video = document.createElement("video"), url = URL.createObjectURL(file);
     urls.get("commerceRemixVideo").push(url); video.controls = true; video.playsInline = true; video.preload = "metadata"; video.src = url;
     video.addEventListener("loadedmetadata", () => {
-      const valid = Number.isFinite(video.duration) && video.duration >= 4.9 && video.duration <= 15.1;
+      const valid = Number.isFinite(video.duration) && video.duration >= 4.9 && video.duration <= 16;
+      const aspect = video.videoWidth / video.videoHeight;
+      const ratios = {"16:9": 16 / 9, "9:16": 9 / 16, "1:1": 1, "4:3": 4 / 3, "3:4": 3 / 4};
+      const closest = Object.keys(ratios).reduce((best, item) => Math.abs(aspect / ratios[item] - 1) < Math.abs(aspect / ratios[best] - 1) ? item : best, "16:9");
+      const supported = Math.abs(aspect / ratios[closest] - 1) <= .08;
       $("#commerceRemixVideoInfo").textContent = valid
-        ? `${video.duration.toFixed(1)} 秒 · ${video.duration > 15 ? "将使用前 15 秒" : "将按原片时长生成"}`
-        : "请上传 5–15 秒的视频";
-      $("#commerceRemixForm button[type=submit]").disabled = !valid;
+        ? `${video.duration.toFixed(1)} 秒 · ${video.videoWidth}×${video.videoHeight} · ${supported ? "保留原画幅和尺寸" : "暂不支持这个画幅"}${video.duration > 15 ? " · 将使用前 15 秒" : ""}`
+        : "请上传 5–15 秒的视频（不足 16 秒的片尾余量可自动截取）";
+      $("#commerceRemixForm button[type=submit]").disabled = !valid || !supported;
     });
     video.addEventListener("error", () => { $("#commerceRemixVideoInfo").textContent = "浏览器无法预览该视频，请使用 MP4 视频。"; });
     target.append(video);
@@ -463,7 +630,12 @@
       roles.push(input.dataset.commerceRole); form.append("images", input.files[0]);
     }
     form.append("remix_roles", JSON.stringify(roles));
-    submit(event.currentTarget, form, "/api/account/commerce-remix/720p", $("#commerceRemixError"), true);
+    const quality = $("#commerceRemixQuality").value;
+    submit(event.currentTarget, form, `/api/account/commerce-remix/${quality}`, $("#commerceRemixError"), true, "正在提交…");
+  });
+  $("#commerceRemixQuality").addEventListener("change", event => {
+    const option = event.currentTarget.selectedOptions[0];
+    $("#commerceRemixPrice").textContent = `每条视频 ${option.dataset.price} 积分，成功后扣除；失败退回积分。`;
   });
   $("#digitalHumanForm").addEventListener("submit", event => {
     event.preventDefault();
@@ -483,17 +655,21 @@
   });
   $("#imageEditForm").addEventListener("submit", async event => {
     event.preventDefault(); const files = editingFiles(), form = new FormData();
-    if (files.length > 4 || files.some(file => file.size > 30 * 1024 ** 2)) { $("#imageEditError").textContent = "最多选择 4 张图片，每张不超过 30 MB"; return; }
-    const button = event.currentTarget.querySelector('[type="submit"]'), label = button.textContent;
-    button.disabled = true; button.textContent = "正在优化图片…";
-    const prepared = await Promise.all(files.map(compactEditImage));
-    button.disabled = false; button.textContent = label;
-    for (const file of prepared) form.append("images", file);
-    form.append("prompt", $("#editPrompt").value);
+    if (files.length > Number(imageEditConfig?.max_reference_images || 10) || files.some(file => file.size > 20 * 1024 ** 2)) { $("#imageEditError").textContent = "最多选择 10 张图片，每张不超过 20 MB"; return; }
+    const prompt = $("#editPrompt").value.trim();
+    if (!prompt || prompt.length > Number(imageEditConfig?.max_prompt_chars || 20000)) { $("#imageEditError").textContent = "请填写 1–20000 字的提示词"; return; }
+    // Avoid decoding/re-encoding large PNGs in the browser before the upload
+    // starts. The API normalizes images after direct upload, and the Tencent
+    // uploader already handles large files in bounded chunks.
+    for (const file of files) form.append("images", file);
+    form.append("prompt", prompt);
+    form.append("model", imageEditModel);
+    form.append("aspect_ratio", imageEditAspectRatio);
+    form.append("count", $("#editCount").value);
     // kind only tells the staging grant which media vocabulary to use; the
     // endpoint itself ignores it.
-    form.append("kind", "reference");
-    await submit(event.currentTarget, form, "/api/account/image-edits", $("#imageEditError"), true);
+    form.append("kind", "image-edit");
+    await submit(event.currentTarget, form, "/api/account/image-edits", $("#imageEditError"), true, "正在上传素材…");
   });
   $("#editorForm")?.addEventListener("submit", event => {
     event.preventDefault(); const form = new FormData(), file = $("#editorVideo").files[0], selected = [...$("#editorImages").files];
@@ -648,11 +824,15 @@
       if (lines.length > 20) { error.textContent = "一次最多 20 条"; return; }
       if (files.length > 3) { error.textContent = "参考图片最多 3 张"; return; }
       if (!window.confirm(`将创建 ${lines.length} 条任务，每条按视频时长计费（每 15 秒 ${reenactPrice15} pt）。继续？`)) return;
-      const body = new FormData(); body.append("prompts", lines.join("\n")); body.append("note", form.querySelector("input[type=text]").value.trim());
+      const body = new FormData(); body.append("kind", "reference"); body.append("prompts", lines.join("\n")); body.append("note", form.querySelector("input[type=text]").value.trim());
       files.forEach(file => body.append("images", file));
       const submitButton = form.querySelector("button[type=submit]"); submitButton.disabled = true; error.textContent = "";
       try {
-        const result = await api(`/api/account/video-templates/${encodeURIComponent(tpl.id)}/runs`, {method:"POST", body});
+        const staged = await prepareStudioDirectUpload(body, progress => {
+          error.textContent = `参考图片直传 ${progress}%…`;
+        });
+        error.textContent = "正在创建任务…";
+        const result = await api(`/api/account/video-templates/${encodeURIComponent(tpl.id)}/runs`, {method:"POST", body:staged});
         toast(`已创建 ${result.items.length}/${result.requested} 条任务`); form.reset(); form.classList.add("hidden"); refreshTasks(); loadTemplates();
       } catch (err) { error.textContent = err.message; }
       finally { submitButton.disabled = false; }
@@ -719,14 +899,17 @@
     try {
       const data = await api(`/api/account/tasks?limit=200&tool=${encodeURIComponent(view.tool)}`);
       if (version !== epoch || !account) return;
-      const items = data.items.filter(task => view.tool.split(",").includes(task.tool)), target = $(view.list);
+      // The API has already applied the requested tool filter. Trust that
+      // result: redundant client filtering hid legacy commerce tasks whose
+      // internal worker name was still `remix`.
+      const items = Array.isArray(data.items) ? [...data.items] : [], target = $(view.list);
       for (const [id, task] of createdTasks) {
         if (!view.tool.split(",").includes(task.tool)) continue;
         if (items.some(item => item.id === id)) createdTasks.delete(id);
         else items.unshift(task);
       }
       const existing = new Map([...target.querySelectorAll(".creative-task")].map(card => [card.dataset.taskId, card]));
-      galleryStage(target);
+      const stage = galleryStage(target);
       addCarouselControls(target.closest(".creative-results"), target);
       target.querySelector(".empty")?.remove();
       for (const task of items) { let card = existing.get(task.id); if (card) updateCard(task, card); else { card = makeCard(task); target.append(card); } existing.delete(task.id); }
@@ -748,11 +931,12 @@
       });
       if (!items.length) target.innerHTML = '<div class="empty">还没有任务。上传素材并提交后，结果会显示在这里。</div>';
       if (items.length && !section.dataset.selectedTask) {
-        const first = items.find(item => item.status === "completed" && !item.output_expired) || items[0];
-        const card = target.querySelector(`[data-task-id="${CSS.escape(first.id)}"]`);
-        if (card) void previewCreativeTask(first, card, card.querySelector(".creative-view"));
+        const first = items.find(item => item.status === "completed" && !item.output_expired);
+        const card = first && target.querySelector(`[data-task-id="${CSS.escape(first.id)}"]`);
+        if (first && card) void previewCreativeTask(first, card, card.querySelector(".creative-view"));
+        else if (items.some(isActive)) stage.querySelector(".creative-gallery-canvas").innerHTML = '<div class="creative-gallery-empty">任务正在处理中，进度会显示在下方记录中</div>';
       }
-      if (items.some(isActive)) timer = setTimeout(refreshTasks, 3000);
+      if (items.some(isActive) || (activePage === "commerce-remix" && Date.now() < taskRefreshUntil)) timer = setTimeout(refreshTasks, 3000);
     } catch (error) { if (version === epoch) { toast(error.message); timer = setTimeout(refreshTasks, 8000); } }
     finally {
       refreshing = false;
@@ -889,12 +1073,15 @@
     const formElement = event.currentTarget;
     const source = $("#musicSource").files[0], error = $("#musicError"), button = formElement.querySelector('[type="submit"]');
     if (!source) { error.textContent = "请选择音频文件"; return; }
-    const form = new FormData(); form.append("source", source); form.append("style", $("#musicStyle").value); form.append("voice", $("#musicVoice").value); form.append("prompt", $("#musicPrompt").value); form.append("lyrics", $("#musicLyrics").value); form.append("title", source.name);
+    const form = new FormData(); form.append("kind", "reference"); form.append("audios", source, source.name); form.append("style", $("#musicStyle").value); form.append("voice", $("#musicVoice").value); form.append("prompt", $("#musicPrompt").value); form.append("lyrics", $("#musicLyrics").value); form.append("title", source.name);
     button.disabled = true; error.textContent = "";
     showMusicPending(source.name, "正在上传音频…", 4);
-    uploadForm("/api/account/music", form, {"Idempotency-Key": crypto.randomUUID()}, phase => {
-      showMusicPending(source.name, phase.phase === "creating" ? "正在创建任务…" : `正在上传音频 ${phase.progress ?? 0}%`, phase.progress ?? 4);
-    }).then(task => {
+    const uploadKey = crypto.randomUUID();
+    prepareStudioDirectUpload(form, progress => {
+      showMusicPending(source.name, `音频直传 ${progress}%…`, progress);
+    }).then(staged => uploadForm("/api/account/music", staged, {"Idempotency-Key": uploadKey}, phase => {
+      showMusicPending(source.name, phase.phase === "creating" ? "正在创建任务…" : `正在上传音频 ${phase.progress ?? 0}%`, phase.progress ?? 0);
+    })).then(task => {
       toast("音乐任务已创建");
       document.querySelector('[data-task-id="music-pending"]')?.remove();
       refreshMusicTasks();

@@ -92,3 +92,36 @@ def test_every_h3_generation_graph_uses_solattn(monkeypatch, tmp_path: Path) -> 
     for graph in hd_graphs:
         assert graph["104"]["class_type"] == "SolAttnMiniMax"
         assert graph["304"]["class_type"] == "SolAttnMiniMax"
+
+
+def test_blackwell_graph_skips_sage_nodes_and_preserves_4090_graph(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("H3_ROOT", str(tmp_path))
+    monkeypatch.setenv("H3_SOLATTN", "off")
+    server = _load_server(tmp_path)
+    graph = server.reference_latent_hd_workflow(
+        "test", ["person.png"], [], ["voice.mp3"], 15, "16:9", 0.9, 1.0, 1
+    )
+    sage_ids = {
+        node_id for node_id, node in graph.items()
+        if "SageAttentionPatch" in str(node.get("class_type", ""))
+    }
+    assert sage_ids
+
+    monkeypatch.setenv("H3_USE_SAGE_ATTENTION", "1")
+    regular_graph = server._configure_attention_graph(graph)
+    assert regular_graph is graph
+    assert sage_ids == {
+        node_id for node_id, node in regular_graph.items()
+        if "SageAttentionPatch" in str(node.get("class_type", ""))
+    }
+
+    monkeypatch.setenv("H3_USE_SAGE_ATTENTION", "0")
+    blackwell_graph = server._configure_attention_graph(graph)
+    assert not sage_ids.intersection(blackwell_graph)
+    assert any(
+        isinstance(value, list) and value and value[0] in sage_ids
+        for node in blackwell_graph.values()
+        for value in (node.get("inputs") or {}).values()
+    ) is False
+    # The worker's reusable source graph remains untouched.
+    assert sage_ids.issubset(graph)

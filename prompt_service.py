@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -20,6 +21,7 @@ from prompt_templates import MODE_TEMPLATES, DIGITAL_HUMAN_H3_TEMPLATE, digital_
 
 MODEL = os.getenv("H3_PROMPT_MODEL", "deepseek-v4-flash").strip()
 DEFAULT_BASE_URL = os.getenv("H3_PROMPT_DEFAULT_BASE_URL", "https://api.deepseek.com").strip()
+log = logging.getLogger(__name__)
 MAX_PROMPT_CHARS = 40_000
 BASE_FIELDS = (
     "integrated_multimodal_description:",
@@ -52,7 +54,9 @@ MEDIA_EVIDENCE_NOTICE = """Media evidence contract:
 
 
 class PromptServiceError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def resolve_mode(kind: str, inputs: list[dict]) -> str:
@@ -248,17 +252,53 @@ def save_settings(*, enabled: bool, base_url: str, api_key: str = "") -> dict:
     return public_settings()
 
 
-def _runtime_settings() -> dict:
+def save_merchant_override(*, merchant_id: str, base_url: str, model: str,
+                           api_key: str) -> None:
+    """Store one merchant's primary text model without exposing its key to tasks."""
+    normalized = normalize_base_url(base_url)
+    model = model.strip()
+    api_key = api_key.strip()
+    if not merchant_id or not model or not api_key or len(api_key) > 512:
+        raise ValueError("商户提示词模型配置不完整")
+    with transaction() as db:
+        if not db.execute("SELECT 1 FROM merchants WHERE id=?", (merchant_id,)).fetchone():
+            raise ValueError("商户不存在")
+        db.execute(
+            """INSERT INTO prompt_service_overrides
+            (merchant_id,base_url,model,api_key_ciphertext,key_hint,updated_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(merchant_id) DO UPDATE SET base_url=excluded.base_url,
+            model=excluded.model,api_key_ciphertext=excluded.api_key_ciphertext,
+            key_hint=excluded.key_hint,updated_at=excluded.updated_at""",
+            (merchant_id, normalized, model, _encrypt(api_key),
+             f"••••{api_key[-4:]}", time.time()),
+        )
+        audit(db, "prompt_service.merchant_override", merchant_id,
+              {"base_url": normalized, "model": model})
+
+
+def _runtime_settings(merchant_id: str | None = None) -> dict:
     with connect() as db:
         row = db.execute("SELECT * FROM prompt_service_settings WHERE id=1").fetchone()
+        override = db.execute(
+            "SELECT * FROM prompt_service_overrides WHERE merchant_id=?",
+            (merchant_id,),
+        ).fetchone() if merchant_id else None
     if not row or not row["enabled"]:
         return {"enabled": False}
+    if override:
+        return {
+            "enabled": True, "base_url": normalize_base_url(override["base_url"]),
+            "api_key": _decrypt(override["api_key_ciphertext"]),
+            "model": override["model"],
+        }
     if not row["api_key_ciphertext"]:
         raise PromptServiceError("提示词服务尚未配置 API Key")
     return {
         "enabled": True,
         "base_url": normalize_base_url(row["base_url"]),
         "api_key": _decrypt(row["api_key_ciphertext"]),
+        "model": MODEL,
     }
 
 
@@ -483,38 +523,93 @@ character, has a stable (S1)/(S2) ID. Write later cuts as
 """
 
 
-async def _call_provider(settings: dict, mode: str, user_request: str) -> str:
-    request = _chat_payload(
-        [
-            {"role": "system", "content": MODE_TEMPLATES[mode]},
-            {"role": "user", "content": user_request},
-        ],
-        max_tokens=8192,
-        # Media modes must translate and structure the user's evidence, not invent
-        # plausible details for assets the compiler cannot actually inspect.
-        temperature=0 if mode != "T2VA" else 0.1,
-    )
-    delays = (0, 1, 2)
-    for attempt, delay in enumerate(delays):
-        if delay:
-            await asyncio.sleep(delay)
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
-                response = await client.post(
-                    _endpoint(settings["base_url"], "chat/completions"),
-                    headers={"Authorization": f"Bearer {settings['api_key']}"},
-                    json=request,
+async def _call_provider(settings: dict, mode: str, user_request: str, *,
+                         system_prompt: str | None = None,
+                         max_tokens: int = 8192) -> str:
+    messages = [
+        {"role": "system", "content": system_prompt if system_prompt is not None else MODE_TEMPLATES[mode]},
+        {"role": "user", "content": user_request},
+    ]
+    temperature = 0 if mode != "T2VA" else 0.1
+
+    async def request_from_provider(*, base_url: str, api_key: str, model: str,
+                                    supports_thinking: bool, timeout_seconds: float) -> str:
+        request = _chat_payload(
+            messages,
+            max_tokens=max_tokens,
+            # Media modes must translate and structure the user's evidence, not invent
+            # plausible details for assets the compiler cannot actually inspect.
+            temperature=temperature,
+        )
+        request["model"] = model
+        if not supports_thinking:
+            request.pop("thinking", None)
+        delays = (0, 1, 2)
+        for attempt, delay in enumerate(delays):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout_seconds, connect=min(20, timeout_seconds))
+                ) as client:
+                    response = await client.post(
+                        _endpoint(base_url, "chat/completions"),
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json=request,
+                    )
+            except httpx.HTTPError as exc:
+                # Timeouts signal provider degradation; fail over immediately so
+                # prompt integration can still complete without occupying a GPU slot.
+                if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
+                    raise PromptServiceError("提示词服务响应超时", retryable=True) from exc
+                if attempt == len(delays) - 1:
+                    raise PromptServiceError("无法连接提示词服务", retryable=True) from exc
+                continue
+            if response.status_code in {429, 500, 502, 503, 504} and attempt < len(delays) - 1:
+                continue
+            if response.status_code >= 400:
+                raise PromptServiceError(
+                    _provider_error(response),
+                    retryable=response.status_code in {429, 500, 502, 503, 504},
                 )
-        except httpx.HTTPError as exc:
-            if attempt == len(delays) - 1:
-                raise PromptServiceError("无法连接提示词服务") from exc
-            continue
-        if response.status_code in {429, 500, 502, 503, 504} and attempt < len(delays) - 1:
-            continue
-        if response.status_code >= 400:
-            raise PromptServiceError(_provider_error(response))
-        return _response_content(response, max_chars=MAX_PROMPT_CHARS)
-    raise PromptServiceError("提示词服务暂时不可用")
+            try:
+                return _response_content(response, max_chars=MAX_PROMPT_CHARS)
+            except PromptServiceError as exc:
+                if attempt == len(delays) - 1:
+                    raise PromptServiceError(str(exc), retryable=True) from exc
+        raise PromptServiceError("提示词服务暂时不可用", retryable=True)
+
+    try:
+        return await request_from_provider(
+            base_url=settings["base_url"], api_key=settings["api_key"],
+            model=settings.get("model", MODEL),
+            supports_thinking="deepseek" in settings["base_url"].lower(),
+            timeout_seconds=30,
+        )
+    except PromptServiceError as primary_error:
+        fallback_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+        if not fallback_key:
+            raise
+        fallback_base = normalize_base_url(os.getenv(
+            "H3_VISION_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ))
+        fallback_model = os.getenv("H3_PROMPT_FALLBACK_MODEL", "qwen-plus").strip() or "qwen-plus"
+        log.warning(
+            "Primary prompt provider failed (%s); retrying prompt integration with configured Qwen fallback model %s",
+            str(primary_error)[:180], fallback_model,
+        )
+        try:
+            result = await request_from_provider(
+                base_url=fallback_base, api_key=fallback_key,
+                model=fallback_model, supports_thinking=False, timeout_seconds=120,
+            )
+        except PromptServiceError as fallback_error:
+            raise PromptServiceError(
+                f"主提示词服务不可用，Qwen 备用服务也未完成整合：{fallback_error}",
+                retryable=primary_error.retryable or fallback_error.retryable,
+            ) from fallback_error
+        log.info("Prompt integration completed by Qwen fallback model %s", fallback_model)
+        return result
 
 
 async def plan_editor_assets(brief: str, analysis: dict, uploaded_count: int) -> dict:
@@ -585,6 +680,7 @@ async def compile_prompt(
     duration: float,
     ratio: str,
     inputs: list[dict],
+    merchant_id: str | None = None,
 ) -> dict:
     mode = resolve_mode(kind, inputs)
     original = brief.strip()
@@ -598,7 +694,7 @@ async def compile_prompt(
             "provider_used": False,
             "reason": "already_structured",
         }
-    settings = _runtime_settings()
+    settings = _runtime_settings(merchant_id) if merchant_id else _runtime_settings()
     if not settings.get("enabled"):
         return {
             "prompt": original, "mode": mode, "provider_used": False,
@@ -617,12 +713,13 @@ async def compile_prompt(
 
 async def compile_digital_human_direction(
     *, direction: str, duration: float, ratio: str,
+    merchant_id: str | None = None,
 ) -> dict:
     """Format optional digital-human direction without touching locked references."""
     original = direction.strip()
     if not original:
         return {"direction": "", "provider_used": False, "reason": "empty"}
-    settings = _runtime_settings()
+    settings = _runtime_settings(merchant_id) if merchant_id else _runtime_settings()
     if not settings.get("enabled"):
         return {"direction": original, "provider_used": False, "reason": "service_disabled"}
     manifest = [
@@ -653,12 +750,13 @@ User's optional direction:
 
 async def compile_digital_human_prompt(
     *, direction: str, duration: float, ratio: str,
+    merchant_id: str | None = None,
 ) -> dict:
     """Add only user directions to the fixed, short H3 avatar prompt once."""
     original = direction.strip()
     if not original:
         return {"prompt": digital_human_h3_prompt(), "provider_used": False, "reason": "no_direction"}
-    settings = _runtime_settings()
+    settings = _runtime_settings(merchant_id) if merchant_id else _runtime_settings()
     if not settings.get("enabled"):
         return {"prompt": "", "provider_used": False, "reason": "service_disabled"}
     request = f"""将用户要求简洁地加入下面的 MiniMax H3 多参考提示词。
@@ -698,7 +796,8 @@ async def compile_remix_prompt(brief: str, duration: float, ratio: str,
                                inputs: list[dict], roles: list[str], audio: str,
                                blueprint: dict,
                                keyframes: list[dict] | None = None,
-                               generic_editor: bool = False) -> dict:
+                               generic_editor: bool = False,
+                               merchant_id: str | None = None) -> dict:
     from commerce import generic_editor_prompt, remix_prompt
     import remix_hypit
 
@@ -710,7 +809,7 @@ async def compile_remix_prompt(brief: str, duration: float, ratio: str,
         try:
             result = await compile_prompt(
                 kind="reference", brief=editor_brief, duration=duration,
-                ratio=ratio, inputs=inputs,
+                ratio=ratio, inputs=inputs, merchant_id=merchant_id,
             )
         except PromptServiceError:
             result = {"prompt": "", "provider_used": False}

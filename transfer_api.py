@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import base64
+import fcntl
 import re
 import time
 import uuid
@@ -54,12 +55,13 @@ def _task(task_id: str):
 
 def _parent_task_id(task_id: str) -> str:
     """Return the merchant task id represented by a worker callback id."""
-    # Current runner: ``vid_xxx-take-001``.  Older deployed runners used
-    # ``vid_xxx-seg01-1``; both point at the same merchant parent task.
+    # Reenactment reruns add ``-rN`` before the segment id.  The signed
+    # output and diagnostic callbacks still belong to the merchant task.
     if re.fullmatch(r"(vid_[^-]+)-take-\d{3}", task_id):
         return task_id.rsplit("-take-", 1)[0]
-    if re.fullmatch(r"(vid_[^-]+)-seg\d{2}-\d+", task_id):
-        return task_id.rsplit("-seg", 1)[0]
+    match = re.fullmatch(r"(vid_[^-]+)(?:-r\d+)?-seg\d{2}-\d+", task_id)
+    if match:
+        return match.group(1)
     return task_id
 
 
@@ -105,7 +107,7 @@ async def browser_upload(request: Request, token: str) -> Response:
             raise HTTPException(422, "素材上传大小不匹配")
     temporary = target.with_name(
         f".{target.name}.{uuid.uuid4().hex}.part" if not chunked
-        else f".{target.name}.chunk-{part:04d}"
+        else f".{target.name}.chunk-{part:04d}.{uuid.uuid4().hex}.part"
     )
     written = 0
     try:
@@ -122,39 +124,43 @@ async def browser_upload(request: Request, token: str) -> Response:
             if written != expected:
                 raise HTTPException(422, "素材分片不完整")
             temporary.chmod(0o600)
-            # The last arriving part performs the assembly. Since every part
-            # is written atomically by its own request, a client can retry a
-            # failed part without invalidating the other parts.
             chunk_paths = [target.with_name(f".{target.name}.chunk-{index:04d}") for index in range(parts)]
-            if all(path.is_file() for path in chunk_paths):
-                assembled = target.with_name(f".{target.name}.{uuid.uuid4().hex}.assemble")
+            # A chunk only becomes visible after its complete body is durable.
+            # Lock assembly so separate API workers cannot read/delete the same
+            # set of chunks concurrently.
+            lock = target.with_name(f".{target.name}.assemble.lock")
+            with lock.open("a+b") as guard:
+                fcntl.flock(guard, fcntl.LOCK_EX)
                 try:
-                    with assembled.open("wb") as output:
-                        for path in chunk_paths:
-                            with path.open("rb") as source:
-                                while True:
-                                    data = source.read(1024 * 1024)
-                                    if not data:
-                                        break
-                                    output.write(data)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    if assembled.stat().st_size != int(grant["size_bytes"]):
-                        raise HTTPException(422, "素材合并大小不匹配")
-                    assembled.chmod(0o600)
-                    assembled.replace(target)
+                    if not (target.is_file() and target.stat().st_size == int(grant["size_bytes"])):
+                        temporary.replace(chunk_paths[part])
+                        if all(path.is_file() for path in chunk_paths):
+                            assembled = target.with_name(f".{target.name}.{uuid.uuid4().hex}.assemble")
+                            try:
+                                with assembled.open("wb") as output:
+                                    for path in chunk_paths:
+                                        with path.open("rb") as source:
+                                            while data := source.read(1024 * 1024):
+                                                output.write(data)
+                                    output.flush()
+                                    os.fsync(output.fileno())
+                                if assembled.stat().st_size != int(grant["size_bytes"]):
+                                    raise HTTPException(422, "素材合并大小不匹配")
+                                assembled.chmod(0o600)
+                                assembled.replace(target)
+                            finally:
+                                assembled.unlink(missing_ok=True)
+                            for path in chunk_paths:
+                                path.unlink(missing_ok=True)
                 finally:
-                    assembled.unlink(missing_ok=True)
-                for path in chunk_paths:
-                    path.unlink(missing_ok=True)
+                    fcntl.flock(guard, fcntl.LOCK_UN)
             return Response(status_code=204)
         if written != int(grant["size_bytes"]):
             raise HTTPException(422, "素材上传不完整")
         temporary.chmod(0o600)
         temporary.replace(target)
     finally:
-        if not chunked:
-            temporary.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
     return Response(status_code=204)
 
 

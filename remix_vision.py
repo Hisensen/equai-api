@@ -302,11 +302,11 @@ def drop_background(text: str) -> str:
 
 async def _wash_shots_with_deepseek(shots: list[dict], roles: list[str], analysis: dict,
                                     role_only_references: bool = False) -> tuple[float, dict]:
-    """Rewrite source shots against the uploaded role map using the configured DeepSeek service.
+    """Rewrite source shots against the uploaded role map using the prompt service.
 
-    DeepSeek is text-only here. In the commerce app it receives only the user-selected role mapping and source
-    script; target pictures are neither sent to nor described for DeepSeek. Other existing remix modes can
-    continue to provide the target descriptions from their vision pass.
+    The text model receives only the user-selected role mapping and source script in the commerce app;
+    target pictures are neither sent to nor described for it. Other existing remix modes can continue
+    to provide target descriptions from their vision pass.
     A failed wash must stop this task rather than silently send a source-conflicting script to H3.
     """
     from reenact import llm
@@ -344,18 +344,18 @@ async def _wash_shots_with_deepseek(shots: list[dict], roles: list[str], analysi
             max_tokens=5000, temperature=0.0,
         )
     except Exception as exc:
-        raise VisionError(f"DeepSeek 分镜洗稿失败，已停止提交生成：{exc}") from exc
+        raise VisionError(f"分镜提示词整理失败，已停止提交生成：{exc}") from exc
     rewritten = result.get("shots") if isinstance(result, dict) else None
     if not isinstance(rewritten, list) or len(rewritten) != len(shots):
-        raise VisionError("DeepSeek 分镜洗稿结果无效，已停止提交生成")
+        raise VisionError("分镜提示词整理结果无效，已停止提交生成")
     for shot, text in zip(shots, rewritten):
         if not isinstance(text, str) or not text.strip():
-            raise VisionError("DeepSeek 分镜洗稿结果缺少镜头内容，已停止提交生成")
+            raise VisionError("分镜提示词整理结果缺少镜头内容，已停止提交生成")
         text = placeholders(text)
         required = set(re.findall(r"\{(?:PERSON|PRODUCT|PLACE)\}", shot["text"]))
         actual = set(re.findall(r"\{(?:PERSON|PRODUCT|PLACE)\}", text))
         if not required <= actual:
-            raise VisionError("DeepSeek 分镜洗稿改动了人物、商品或场景占位符，已停止提交生成")
+            raise VisionError("分镜提示词整理改动了人物、商品或场景占位符，已停止提交生成")
         shot["text"] = text
     return ledger.yuan, {"calls": ledger.calls, "seconds": round(time.monotonic() - started, 2)}
 

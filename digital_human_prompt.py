@@ -107,7 +107,8 @@ def append_direction(base_prompt: str, direction: str) -> str:
     )
 
 
-async def merge_direction(base_prompt: str, direction: str) -> dict:
+async def merge_direction(base_prompt: str, direction: str, *,
+                          merchant_id: str | None = None) -> dict:
     """Fold the direction into the template with DeepSeek.
 
     Never raises for a provider problem: a failed or malformed merge falls back
@@ -120,29 +121,16 @@ async def merge_direction(base_prompt: str, direction: str) -> dict:
         return {"prompt": base_prompt, "provider_used": False, "reason": "no_direction"}
     fallback = {"prompt": append_direction(base_prompt, direction), "provider_used": False}
     try:
-        settings = prompt_service._runtime_settings()
+        settings = (prompt_service._runtime_settings(merchant_id) if merchant_id
+                    else prompt_service._runtime_settings())
     except prompt_service.PromptServiceError as exc:
         return {**fallback, "reason": f"unconfigured: {exc}"}
-    request = prompt_service._chat_payload(
-        [
-            {"role": "system", "content": _MERGE_RULES},
-            {"role": "user", "content":
-                f"Base prompt:\n{base_prompt}\n\nUser direction:\n{direction}"},
-        ],
-        max_tokens=4096,
-        temperature=0,
-    )
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=15)) as client:
-            response = await client.post(
-                prompt_service._endpoint(settings["base_url"], "chat/completions"),
-                headers={"Authorization": f"Bearer {settings['api_key']}"},
-                json=request,
-            )
-        if response.status_code >= 400:
-            return {**fallback, "reason": prompt_service._provider_error(response)}
-        merged = prompt_service._response_content(response, max_chars=40000)
+        merged = await prompt_service._call_provider(
+            settings, "DigitalHumanRef2VA",
+            f"Base prompt:\n{base_prompt}\n\nUser direction:\n{direction}",
+            system_prompt=_MERGE_RULES, max_tokens=4096,
+        )
     except Exception as exc:  # noqa: BLE001 - polish must never fail a paid task
         return {**fallback, "reason": f"provider error: {exc}"[:200]}
     merged = re.sub(r"^```[a-zA-Z]*\n|```$", "", merged.strip()).strip()

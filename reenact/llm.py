@@ -1,19 +1,23 @@
 """Model calls used by the reenactment stages.
 
 vision(): Qwen-VL through DashScope's OpenAI-compatible endpoint (reads video and images).
-director(): the configured prompt service (DeepSeek) for text-only creative decisions.
+director(): the configured primary prompt model, with Qwen fallback for text-only decisions.
 Both return parsed JSON and record token cost on a shared Ledger.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
 
 import httpx
+
+
+log = logging.getLogger(__name__)
 
 
 class ModelError(RuntimeError):
@@ -23,6 +27,7 @@ class ModelError(RuntimeError):
 @dataclass
 class Ledger:
     calls: list[dict] = field(default_factory=list)
+    merchant_id: str | None = None
 
     def add(self, kind: str, seconds: float, tokens_in: int, tokens_out: int, yuan: float) -> None:
         self.calls.append({"kind": kind, "seconds": round(seconds, 2), "in": tokens_in,
@@ -108,39 +113,86 @@ async def vision(content: list[dict], ledger: Ledger, *, kind: str, max_tokens: 
 
 async def director(system: str, user: str, ledger: Ledger, *, kind: str, max_tokens: int = 8192,
                    temperature: float = 0.4) -> dict | list:
-    """One DeepSeek call returning JSON, through the admin-configured prompt service."""
+    """Use the configured primary prompt model, then Qwen if the primary fails."""
     import prompt_service
 
-    settings = prompt_service._runtime_settings()
-    if not settings.get("enabled"):
-        raise ModelError("提示词服务（DeepSeek）未启用，无法编写新台词")
-    body = prompt_service._chat_payload(
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        max_tokens=max_tokens, temperature=temperature,
-    )
-    body["response_format"] = {"type": "json_object"}
-    url = prompt_service._endpoint(settings["base_url"], "chat/completions")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     price_in = float(_env("H3_DIRECTOR_PRICE_IN_PER_M", "2.0"))
     price_out = float(_env("H3_DIRECTOR_PRICE_OUT_PER_M", "8.0"))
-    for attempt in range(2):
-        started = time.monotonic()
-        data = await _post(url, {"Authorization": f"Bearer {settings['api_key']}"}, body, 240)
-        usage = data.get("usage") or {}
-        tin, tout = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
-        ledger.add(kind, time.monotonic() - started, tin, tout, (tin * price_in + tout * price_out) / 1e6)
-        choice = (data.get("choices") or [{}])[0]
-        text = str((choice.get("message") or {}).get("content") or "")
-        try:
-            value = parse_json(text)
-            if isinstance(value, dict):
-                return value
-        except (ValueError, json.JSONDecodeError):
-            pass
-        if attempt:
-            reason = choice.get("finish_reason")
-            raise ModelError(f"{kind}: 导演模型没有返回有效 JSON（{reason}）")
-        body["messages"] = body["messages"] + [
-            {"role": "assistant", "content": text[:6000]},
-            {"role": "user", "content": "That was not one complete JSON object. Return ONLY the complete JSON object."},
-        ]
-    raise ModelError(f"{kind}: 导演模型调用失败")
+
+    async def call_provider(*, base_url: str, api_key: str, model: str,
+                            supports_thinking: bool) -> dict:
+        body = prompt_service._chat_payload(
+            messages, max_tokens=max_tokens, temperature=temperature,
+        )
+        body["model"] = model
+        body["response_format"] = {"type": "json_object"}
+        if not supports_thinking:
+            body.pop("thinking", None)
+        provider_url = prompt_service._endpoint(base_url, "chat/completions")
+        for attempt in range(2):
+            started = time.monotonic()
+            data = await _post(
+                provider_url, {"Authorization": f"Bearer {api_key}"}, body, 240,
+            )
+            usage = data.get("usage") or {}
+            tin = int(usage.get("prompt_tokens") or 0)
+            tout = int(usage.get("completion_tokens") or 0)
+            ledger.add(
+                kind, time.monotonic() - started, tin, tout,
+                (tin * price_in + tout * price_out) / 1e6,
+            )
+            choice = (data.get("choices") or [{}])[0]
+            content = str((choice.get("message") or {}).get("content") or "")
+            try:
+                value = parse_json(content)
+                if isinstance(value, dict):
+                    return value
+            except (ValueError, json.JSONDecodeError):
+                pass
+            if attempt:
+                reason = choice.get("finish_reason")
+                raise ModelError(f"{kind}: 导演模型没有返回有效 JSON（{reason}）")
+            body["messages"] = messages + [
+                {"role": "assistant", "content": content[:6000]},
+                {"role": "user", "content": "That was not one complete JSON object. Return ONLY the complete JSON object."},
+            ]
+        raise ModelError(f"{kind}: 导演模型调用失败")
+
+    primary_error: Exception
+    try:
+        settings = (prompt_service._runtime_settings(ledger.merchant_id)
+                    if ledger.merchant_id else prompt_service._runtime_settings())
+        if not settings.get("enabled"):
+            raise ModelError("主提示词模型未启用")
+        return await call_provider(
+            base_url=settings["base_url"], api_key=settings["api_key"],
+            model=settings.get("model", prompt_service.MODEL),
+            supports_thinking="deepseek" in settings["base_url"].lower(),
+        )
+    except (ModelError, prompt_service.PromptServiceError) as exc:
+        primary_error = exc
+
+    fallback_key = _env("DASHSCOPE_API_KEY", "")
+    if not fallback_key:
+        raise ModelError(f"主提示词模型失败，且未配置 Qwen 备用 Key：{primary_error}") from primary_error
+
+    fallback_base = prompt_service.normalize_base_url(_env(
+        "H3_VISION_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    ))
+    fallback_model = _env("H3_PROMPT_FALLBACK_MODEL", "qwen-plus") or "qwen-plus"
+    log.warning(
+        "Primary director model failed (%s); retrying %s with Qwen fallback %s",
+        str(primary_error)[:180], kind, fallback_model,
+    )
+    try:
+        result = await call_provider(
+            base_url=fallback_base, api_key=fallback_key,
+            model=fallback_model, supports_thinking=False,
+        )
+    except (ModelError, prompt_service.PromptServiceError) as fallback_error:
+        raise ModelError(
+            f"主提示词模型失败，Qwen 备用模型 {fallback_model} 也未完成：{fallback_error}"
+        ) from fallback_error
+    log.info("Director task %s completed by Qwen fallback model %s", kind, fallback_model)
+    return result

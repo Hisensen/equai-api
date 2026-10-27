@@ -1,0 +1,13 @@
+ARG BASE_IMAGE=harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-720-ref1-6step-io
+FROM ${BASE_IMAGE}
+
+# Bake the standard Worker runtime and custom nodes into each derived image.
+# New pods from a ``-baked-runtime-`` tag do not fetch runtime code at startup.
+USER root
+WORKDIR /
+COPY app/ /app/
+
+LABEL org.opencontainers.image.title="Equai H3 video worker with baked runtime" \
+      org.opencontainers.image.description="H3 standard worker runtime and nodes baked into the image"
+
+# Keep the base image entrypoint and ComfyUI/GPU stack unchanged.

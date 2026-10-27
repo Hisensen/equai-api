@@ -54,8 +54,9 @@ class CommerceTest(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def image_task(self, key=None, content=None):
-        return self.client.post("/api/account/image-edits", data={"prompt": "把背景换为灰色", "note": "测试图"}, files={"images": ("original.png", content or png(), "image/png")}, headers={"Idempotency-Key": key} if key else {})
+    def image_task(self, key=None, content=None, **options):
+        data = {"prompt": "把背景换为灰色", "note": "测试图", **options}
+        return self.client.post("/api/account/image-edits", data=data, files={"images": ("original.png", content or png(), "image/png")}, headers={"Idempotency-Key": key} if key else {})
 
     def row(self, task_id):
         with connect() as db:
@@ -97,6 +98,64 @@ class CommerceTest(unittest.TestCase):
         found = next(item for item in tasks.json()["items"] if item["id"] == task_id)
         self.assertEqual(found["tool"], "commerce_remix")
         self.assertEqual(found["price"], 1.5)
+
+        # Once preflight hands the job to H3, payload._tool becomes `remix`.
+        # It must still appear in the commerce-only task list and retain its
+        # product identity in the API response.
+        with connect() as db:
+            payload = json.loads(db.execute(
+                "SELECT payload FROM merchant_tasks WHERE id=?", (task_id,)
+            ).fetchone()["payload"])
+            payload.pop("_commerce_remix", None)
+            payload["_tool"] = "remix"
+            payload["_remix"] = {"version": 3, "commerce_depth_worker": True}
+            db.execute(
+                "UPDATE merchant_tasks SET payload=? WHERE id=?",
+                (json.dumps(payload), task_id),
+            )
+        tasks = self.client.get("/api/account/tasks?limit=200&tool=commerce_remix")
+        self.assertEqual(tasks.status_code, 200, tasks.text)
+        found = next(item for item in tasks.json()["items"] if item["id"] == task_id)
+        self.assertEqual(found["tool"], "commerce_remix")
+
+    def test_commerce_remix_accepts_browser_direct_assets(self):
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg unavailable")
+        transfer = test_local_transfer.transfer_storage
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.mp4"
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                "color=c=blue:s=160x90:r=10:d=5", "-c:v", "libx264", str(source),
+            ], check=True, timeout=30)
+            media = [
+                ("videos", "source.mp4", "video/mp4", source.read_bytes()),
+                ("images", "product.png", "image/png", png()),
+            ]
+            grants = []
+            with patch.object(transfer, "UPLOAD_BASE_URL", "https://upload.invalid"):
+                for field, filename, content_type, content in media:
+                    grant = transfer.create_browser_upload_grant(
+                        self.owner, field, filename, content_type, len(content),
+                    )
+                    staged = transfer.browser_upload_path(grant["key"])
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    staged.write_bytes(content)
+                    grants.append(grant)
+            created = self.client.post(
+                "/api/account/commerce-remix/720p",
+                data={
+                    "kind": "reference", "remix_roles": '["product"]',
+                    "direct_assets": json.dumps(grants),
+                },
+            )
+        self.assertEqual(created.status_code, 202, created.text)
+        task = self.row(created.json()["id"])
+        self.assertEqual(task["title"], "电商复刻")
+        objects = json.loads(task["input_objects"])
+        self.assertEqual([item["field"] for item in objects], ["videos", "images"])
+        self.assertTrue(all(item["storage"] == "local" for item in objects))
+        self.assertEqual(json.loads(task["payload"])["_tool"], "commerce_remix")
 
     def test_commerce_remix_keeps_selected_image_files_bound_to_their_roles(self):
         if not shutil.which("ffmpeg"):
@@ -226,7 +285,12 @@ class CommerceTest(unittest.TestCase):
     def test_confirmed_point_two_price_success_and_failure(self):
         with patch.dict(os.environ, {"H3_IMAGE_EDIT_PRICE_MILLI": "200"}):
             config = self.client.get("/api/account/creative/config").json()["image_edit"]
-            self.assertEqual(config, {"available": True, "price": 0.2})
+            self.assertEqual(config["available"], True)
+            self.assertEqual(config["price"], 0.2)
+            self.assertEqual([item["id"] for item in config["models"]], ["gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"])
+            self.assertEqual([float(item["site_price_points"]) for item in config["models"]], [0.2, 0.25, 0.3])
+            self.assertEqual(config["max_reference_images"], 10)
+            self.assertIn("9:21", config["aspect_ratios"])
             for succeeds in (True, False):
                 response = self.image_task()
                 self.assertEqual(response.status_code, 202, response.text)
@@ -254,10 +318,86 @@ class CommerceTest(unittest.TestCase):
         self.assertEqual(recovered.status_code, 200)
         self.assertEqual(recovered.json()["id"], task_id)
         self.assertEqual(TestClient(app).get("/api/account/submissions/commerce-idempotency").status_code, 401)
-        self.assertEqual(row["ratio"], "4:5")
-        self.assertEqual(row["price_milli"], 1250)
+        self.assertEqual(row["ratio"], "auto")
+        self.assertEqual(row["price_milli"], 200)
         with connect() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM point_ledger WHERE task_id=? AND event_type='task_reserve'", (task_id,)).fetchone()[0], 1)
+
+    def test_image_edit_model_ratio_count_are_persisted_and_site_price_is_reserved_per_image(self):
+        created = self.image_task(model="gpt-image-2-4k", aspect_ratio="9:16", count="3")
+        self.assertEqual(created.status_code, 202, created.text)
+        row = self.row(created.json()["id"])
+        options = json.loads(row["payload"])["_image_edit"]
+        self.assertEqual(options["model"], "gpt-image-2-4k")
+        self.assertEqual(options["aspect_ratio"], "9:16")
+        self.assertEqual(options["count"], 3)
+        self.assertEqual(row["price_milli"], 900)
+        self.assertEqual(options["unit_price_milli"], 300)
+        self.assertEqual(row["ratio"], "9:16")
+
+    def test_image_edit_direct_upload_allows_ten_images_without_changing_video_reference_limit(self):
+        transfer = test_local_transfer.transfer_storage
+        with patch.dict(os.environ, {
+            "H3_DIRECT_UPLOADS": "1", "H3_LOCAL_DIRECT_UPLOADS": "1",
+            "H3_UPLOAD_BASE_URL": "https://upload.invalid", "H3_WORKER_TRANSFER_BACKEND": "local",
+        }), patch.object(transfer, "UPLOAD_BASE_URL", "https://upload.invalid"):
+            granted = self.client.post("/api/account/uploads/presign", json={
+                "kind": "image-edit", "files": [
+                    {"field": "images", "filename": f"ref-{i}.png", "content_type": "image/png", "size_bytes": len(png())}
+                    for i in range(10)
+                ],
+            })
+            self.assertEqual(granted.status_code, 200, granted.text)
+            grants = granted.json()["items"]
+        for grant in grants:
+            target = transfer.browser_upload_path(grant["key"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(png())
+        response = self.client.post("/api/account/image-edits", data={
+            "kind": "image-edit", "prompt": "组合参考图", "direct_assets": json.dumps(grants),
+            "model": "gpt-image-2-2k", "aspect_ratio": "4:5", "count": "1",
+        })
+        self.assertEqual(response.status_code, 202, response.text)
+        row = self.row(response.json()["id"])
+        self.assertEqual(len(json.loads(row["input_objects"])), 10)
+        with self.assertRaises(Exception):
+            video_api._validate_media_fields("reference", ["images"] * 10)
+
+    def test_image_edit_batch_poll_refunds_only_failed_images(self):
+        task_id = self.image_task(model="gpt-image-2-2k", count="2").json()["id"]
+        with connect() as db:
+            db.execute("UPDATE merchant_tasks SET status='running',remote_id=?,started_at=? WHERE id=?", (
+                "image:batch:[\"provider-ok\",\"provider-failed\"]", time.time(), task_id,
+            ))
+        provider_values = [
+            {"status": "succeeded", "result": {"url": "https://cdn.example/ok.png"}, "billing": {"amount": "0.0675"}},
+            {"status": "failed"},
+        ]
+        async def get(_url, **_kwargs):
+            return httpx.Response(200, json={"data": provider_values.pop(0)})
+        with patch("httpx.AsyncClient.get", AsyncMock(side_effect=get)), patch("commerce.fetch_image", AsyncMock(return_value=png())):
+            asyncio.run(commerce.poll_image(self.row(task_id)))
+        detail = self.client.get(f"/api/account/tasks/{task_id}").json()
+        self.assertEqual(detail["status"], "completed")
+        self.assertEqual(float(detail["charged"]), 0.25)
+        self.assertEqual(len(detail["artifacts"]), 1)
+        self.assertIn("1/2", detail["message"])
+
+    def test_batch_submit_uses_selected_model_ratio_and_count(self):
+        task_id = self.image_task(model="gpt-image-2-4k", aspect_ratio="21:9", count="2").json()["id"]
+        with connect() as db:
+            db.execute("UPDATE merchant_tasks SET status='dispatching' WHERE id=?", (task_id,))
+        replies = [
+            httpx.Response(201, json={"data": {"id": "uploaded"}}),
+            httpx.Response(202, json={"data": {"tasks": [{"id": "provider-1"}, {"id": "provider-2"}]}}),
+        ]
+        with patch("httpx.AsyncClient.post", AsyncMock(side_effect=replies)) as post:
+            asyncio.run(commerce.dispatch_image(self.row(task_id)))
+        request = post.call_args.kwargs["json"]
+        self.assertEqual(request["model"], "gpt-image-2-4k")
+        self.assertEqual(request["aspect_ratio"], "21:9")
+        self.assertEqual(request["count"], 2)
+        self.assertEqual(json.loads(self.row(task_id)["remote_id"].removeprefix("image:batch:")), ["provider-1", "provider-2"])
 
     def test_image_edit_ingest_does_not_wait_for_cos(self):
         with (
@@ -287,6 +427,20 @@ class CommerceTest(unittest.TestCase):
             content, filename, content_type = commerce.provider_image_payload(transparent, 3)
             self.assertEqual((filename, content_type), ("3.png", "image/png"))
             self.assertEqual(content, transparent.read_bytes())
+
+            # A compact but unsupported source (for example HEIC) must be
+            # transcoded, never relabeled as PNG when JPEG is larger.
+            compact = Path(directory) / "small.tiff"
+            Image.new("RGB", (1, 1), (255, 0, 0)).save(compact, "TIFF")
+            content, filename, content_type = commerce.provider_image_payload(compact, 4)
+            self.assertEqual((filename, content_type), ("4.jpg", "image/jpeg"))
+            self.assertTrue(content.startswith(b"\xff\xd8\xff"))
+
+            webp = Path(directory) / "small.webp"
+            Image.new("RGB", (1, 1), (255, 0, 0)).save(webp, "WEBP")
+            content, filename, content_type = commerce.provider_image_payload(webp, 5)
+            self.assertEqual((filename, content_type), ("5.webp", "image/webp"))
+            self.assertEqual(content, webp.read_bytes())
 
     def test_ingest_keeps_dimensions_but_does_not_expand_photos_to_png(self):
         pixels = os.urandom(1024 * 768 * 3)
@@ -326,7 +480,7 @@ class CommerceTest(unittest.TestCase):
             asyncio.run(commerce.poll_image(self.row(task_id)))
         detail = self.client.get(f"/api/account/tasks/{task_id}").json()
         self.assertEqual(detail["status"], "completed")
-        self.assertEqual(float(detail["charged"]), 1.25)
+        self.assertEqual(float(detail["charged"]), 0.2)
         self.assertEqual(detail["artifacts"][0]["media"], "image")
         url = detail["artifacts"][0]["download_url"]
         download = self.client.get(url)

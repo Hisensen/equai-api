@@ -34,7 +34,7 @@ Standard and remix tasks also have separate dispatcher lanes and concurrency
 budgets. A backlog or cold start in remix cannot consume every ordinary video
 dispatch slot.
 
-Production image-edit price confirmed on 2026-09-10: `H3_IMAGE_EDIT_PRICE_MILLI=200` (0.2 pt per successful image). Failed tasks release the reservation without charging. This price does not change video pricing.
+Production image-edit prices: 1K `0.2`, 2K `0.25`, and 4K `0.3` points per successful image. `H3_IMAGE_EDIT_PRICE_MILLI` remains the enablement gate; each model tier is charged at its configured price, and failed images release their reservation. This pricing does not change video pricing.
 
 ## Account endpoints
 

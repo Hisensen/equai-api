@@ -1,0 +1,125 @@
+# Isolated Blackwell sibling of the validated 2K worker. All model files and
+# ComfyUI/runtime layers stay inherited from the 4090 image; only metadata and
+# 5090-specific kernel defaults differ, so the existing 4090 tag remains untouched.
+ARG BASE_IMAGE=harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-2k-ref1-6step-denoise02-baked-runtime-20261007-v1
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+
+# Keep the model and ComfyUI layers shared, but disable the H3 fused QK/RoPE
+# kernel that fails PTX execution on Blackwell. This edits only this child image.
+RUN python - <<'PYCODE'
+from pathlib import Path
+p = Path("/app/runtime/custom_nodes/ComfyUI_RH_MinMaxH3/minimax_h3_nodes/runtime/h3_settings.py")
+s = p.read_text()
+old = "OPT_FUSED_QK_ROPE = True"
+new = "OPT_FUSED_QK_ROPE = False  # disabled in isolated RTX 5090 image after PTX runtime failure"
+lines = s.splitlines(keepends=True)
+hits = [i for i, line in enumerate(lines) if line.lstrip().startswith(old)]
+already_patched = any(line.lstrip().startswith(new) for line in lines)
+if len(hits) == 1:
+    lines[hits[0]] = new + "\n"
+    p.write_text("".join(lines))
+elif not already_patched:
+    raise SystemExit("unexpected H3 fused QK/RoPE setting; refusing unsafe image build")
+
+# Batch jobs may override the image PATH. Restore the baked virtualenv before
+# the upstream entrypoint invokes `python` and `uvicorn`; otherwise it falls
+# back to the system Python, which lacks the runtime dependencies.
+entrypoint = Path("/app/entrypoint.sh")
+script = entrypoint.read_text()
+needle = 'set -euo pipefail\n'
+addition = '''set -euo pipefail
+
+# PPIO batch-job containers can replace the image PATH. Prefer the baked
+# runtime venv explicitly so both Python imports and the uvicorn CLI resolve.
+if [[ -x /opt/venv/bin/python ]]; then
+  export PATH="/opt/venv/bin:$PATH"
+fi
+'''
+if script.count(needle) != 1:
+    raise SystemExit("unexpected entrypoint header; refusing unsafe image build")
+entrypoint.write_text(script.replace(needle, addition, 1))
+
+# The online API may pass the shared 4090 profile's --use-ck-attention flag
+# and SageAttention default to every job. This dedicated 5090 child image must
+# override those defaults before launching ComfyUI and its task API.
+script = entrypoint.read_text()
+needle = 'comfy_args="${H3_COMFY_ARGS:---reserve-vram 1}"\n'
+replacement = '''comfy_args="${H3_COMFY_ARGS:---reserve-vram 1}"
+# RTX 5090 Blackwell: avoid incompatible Sage/Comfy-Kitchen PTX paths.
+export H3_USE_SAGE_ATTENTION=0
+comfy_args="${comfy_args//--use-ck-attention/--use-pytorch-cross-attention}"
+comfy_args="${comfy_args//--use-sage-attention/--use-pytorch-cross-attention}"
+'''
+if script.count(needle) == 1:
+    entrypoint.write_text(script.replace(needle, replacement, 1))
+elif replacement in script:
+    pass
+else:
+    raise SystemExit("unexpected entrypoint ComfyUI args; refusing unsafe image build")
+
+# The inherited CUDA extension's NVFP4 dequantizer contains PTX that the RTX
+# 5090 driver rejects. Keep all other kernels on their existing dispatch path;
+# route only NVFP4 dequantization through the SM100+ Triton implementation,
+# with the pure PyTorch eager backend as a compatibility fallback.
+nvfp4 = Path("/opt/vsa-overlay/comfy_kitchen/tensor/nvfp4.py")
+source = nvfp4.read_text()
+old_call = "        return ck.dequantize_nvfp4(qdata, params.scale, params.block_scale, params.orig_dtype)"
+new_call = '''        if qdata.device.type == "cuda":
+            try:
+                with ck.use_backend("triton"):
+                    return ck.dequantize_nvfp4(qdata, params.scale, params.block_scale, params.orig_dtype)
+            except Exception:
+                # Triton is the preferred Blackwell path; retain a safe
+                # PyTorch implementation if the local Triton build is absent.
+                with ck.use_backend("eager"):
+                    return ck.dequantize_nvfp4(qdata, params.scale, params.block_scale, params.orig_dtype)
+        return ck.dequantize_nvfp4(qdata, params.scale, params.block_scale, params.orig_dtype)'''
+if source.count(old_call) == 1:
+    nvfp4.write_text(source.replace(old_call, new_call, 1))
+elif new_call not in source:
+    raise SystemExit("unexpected comfy-kitchen NVFP4 dequantizer; refusing unsafe image build")
+
+# The same inherited CUDA extension has an incompatible Blackwell PTX path
+# for the H3 INT8 convrot weights. Use comfy-kitchen's eager implementation
+# only for INT8 dequantization on CUDA in this 5090 image.
+int8 = Path("/opt/vsa-overlay/comfy_kitchen/tensor/int8.py")
+source = int8.read_text()
+old = '''        if getattr(params, "convrot", False):
+            result = torch.ops.comfy_kitchen.dequantize_int8_convrot_weight_dtype(
+                qdata, params.scale, params.convrot_groupsize, output_dtype_code
+            )
+        else:
+            result = torch.ops.comfy_kitchen.dequantize_int8_simple_dtype(qdata, params.scale, output_dtype_code)
+'''
+new = '''        if qdata.device.type == "cuda":
+            import comfy_kitchen
+            with comfy_kitchen.use_backend("eager"):
+                if getattr(params, "convrot", False):
+                    result = torch.ops.comfy_kitchen.dequantize_int8_convrot_weight_dtype(
+                        qdata, params.scale, params.convrot_groupsize, output_dtype_code
+                    )
+                else:
+                    result = torch.ops.comfy_kitchen.dequantize_int8_simple_dtype(qdata, params.scale, output_dtype_code)
+        elif getattr(params, "convrot", False):
+            result = torch.ops.comfy_kitchen.dequantize_int8_convrot_weight_dtype(
+                qdata, params.scale, params.convrot_groupsize, output_dtype_code
+            )
+        else:
+            result = torch.ops.comfy_kitchen.dequantize_int8_simple_dtype(qdata, params.scale, output_dtype_code)
+'''
+if source.count(old) == 1:
+    int8.write_text(source.replace(old, new, 1))
+elif new not in source:
+    raise SystemExit("unexpected comfy-kitchen INT8 dequantizer; refusing unsafe image build")
+PYCODE
+
+COPY worker_long/baked_runtime/app/server.py /app/server.py
+
+ENV H3_GPU_TARGET=5090 \
+    H3_USE_SAGE_ATTENTION=0
+
+LABEL org.opencontainers.image.title="Equai H3 2K worker for RTX 5090" \
+      org.opencontainers.image.description="Blackwell sibling of the 4090 2K worker; uses PyTorch attention and compatible NVFP4/INT8 dequantization paths" \
+      org.equai.gpu.target="5090" \
+      org.equai.base.image="${BASE_IMAGE}"

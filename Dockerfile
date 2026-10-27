@@ -14,6 +14,7 @@ RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt
 COPY *.py /app/
 COPY reenact /app/reenact
 COPY worker_long /app/worker_long
+COPY voice_clone_worker /app/voice_clone_worker
 COPY portal /app/portal
 
 RUN groupadd --gid 10001 h3 \

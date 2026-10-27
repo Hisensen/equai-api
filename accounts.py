@@ -202,10 +202,10 @@ def login(body: LoginBody, response: Response, request: Request) -> dict:
 
 @router.post("/logout", status_code=204)
 def logout(
-    response: Response,
     session: Annotated[str | None, Cookie(alias=MERCHANT_COOKIE)] = None,
 ) -> Response:
     revoke_session(session)
+    response = Response(status_code=204)
     response.delete_cookie(MERCHANT_COOKIE, path="/")
     return response
 

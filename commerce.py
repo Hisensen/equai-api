@@ -35,6 +35,7 @@ except ImportError:
 from database import (
     DATA_DIR,
     PRICE_MILLI,
+    _ledger,
     connect,
     public_id,
     reserve_task,
@@ -65,7 +66,28 @@ REMIX_EXTRA_TEMPLATES = {
 }
 REMIX_TEMPLATE_LABELS.update({"person_scene": "人物＋场景", "product_scene": "商品＋场景"})
 MAX_IMAGE_BYTES = 30 * 1024**2
+MAX_IMAGE_EDIT_FILE_BYTES = 20 * 1024**2
 MAX_VIDEO_BYTES = 300 * 1024**2
+IMAGE_EDIT_ASPECT_RATIOS = (
+    "auto", "1:1", "3:2", "2:3", "4:3", "3:4", "4:5", "5:4",
+    "16:9", "9:16", "21:9", "9:21",
+)
+IMAGE_EDIT_SITE_PRICE_MILLI = {
+    "gpt-image-2": 200,
+    "gpt-image-2-2k": 250,
+    "gpt-image-2-4k": 300,
+}
+IMAGE_EDIT_MODELS = (
+    {"id": "gpt-image-2", "display_name": "GPT-image 2.0 · 标准清晰度",
+     "description": "GPT-image 2.0 经典线路，适合日常快速出图", "tier": "1K",
+     "provider_price_points": "0.0525"},
+    {"id": "gpt-image-2-2k", "display_name": "GPT-image 2.0 · 2K 高清",
+     "description": "GPT-image 2.0 经典线路，适合更高分辨率输出", "tier": "2K",
+     "provider_price_points": "0.0675"},
+    {"id": "gpt-image-2-4k", "display_name": "GPT-image 2.0 · 4K 超清",
+     "description": "GPT-image 2.0 经典线路，适合大尺寸交付", "tier": "4K",
+     "provider_price_points": "0.0825"},
+)
 REMIX_SURCHARGE_MILLI = int(os.getenv("H3_REMIX_SURCHARGE_MILLI", "500"))
 VIDEO_EDITOR_15S_PRICE_MILLI = int(os.getenv("H3_VIDEO_EDITOR_15S_PRICE_MILLI", "2000"))
 log = logging.getLogger("h3.commerce")
@@ -75,9 +97,13 @@ def remix_price_milli(quality: str) -> int:
     return PRICE_MILLI[quality] + REMIX_SURCHARGE_MILLI
 
 
-def commerce_remix_price_milli() -> int:
-    """Fixed public price for one depth-guided e-commerce remake."""
-    return 1500
+def commerce_remix_price_milli(quality: str = "720p") -> int:
+    """Public price for one depth-guided e-commerce remake at the selected tier."""
+    prices = {"720p": 1500, "1080p": 2500}
+    try:
+        return prices[quality]
+    except KeyError as exc:
+        raise ValueError(f"电商复刻不支持的清晰度: {quality}") from exc
 
 
 def video_editor_price_milli(source_seconds: float) -> int:
@@ -94,6 +120,10 @@ def reenact_price_milli(source_seconds: float) -> int:
         raise ValueError("视频重演原视频不能少于 5 秒")
     blocks = max(1, math.ceil((source_seconds - .1) / 15))
     return blocks * int(os.getenv("H3_REENACT_15S_PRICE_MILLI", "4000"))
+
+
+def image_edit_site_price_milli(model_id: str) -> int:
+    return IMAGE_EDIT_SITE_PRICE_MILLI[model_id]
 
 
 def image_settings() -> dict:
@@ -115,8 +145,14 @@ def creative_config(merchant: Annotated[dict, Depends(video_merchant)]) -> dict:
     music_price = int(os.getenv("H3_MUSIC_PRICE_MILLI", "1000"))
     music_internal_ids = {value.strip() for value in os.getenv("H3_MUSIC_INTERNAL_MERCHANT_IDS", "").split(",") if value.strip()}
     music_enabled = os.getenv("H3_MUSIC_ENABLED", "0").strip() == "1"
+    image_models = [{**model, "site_price_points": f"{IMAGE_EDIT_SITE_PRICE_MILLI[model['id']] / 1000:.3f}"}
+                    for model in IMAGE_EDIT_MODELS]
     return {"image_edit": {"available": bool(settings["key"] and settings["price"] > 0),
-                            "price": settings["price"] / 1000 if settings["price"] > 0 else None},
+                            "price": settings["price"] / 1000 if settings["price"] > 0 else None,
+                            "models": image_models,
+                            "aspect_ratios": list(IMAGE_EDIT_ASPECT_RATIOS),
+                            "max_reference_images": 10, "max_prompt_chars": 20000,
+                            "max_count": 20},
             "remix": {"available": True, "max_duration": 15,
                       "prices": {"720p": remix_price_milli("720p") / 1000}},
             "remix2": {"available": True, "max_duration": 15,
@@ -141,18 +177,25 @@ def probe(path: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def _inspect_remix_path(path: Path, digest: str, *, max_duration: int | None = 15) -> dict:
-    return _inspect_remix_info(probe(path), path.stat().st_size, digest, max_duration=max_duration)
+def _inspect_remix_path(path: Path, digest: str, *, max_duration: int | None = 15,
+                        allow_nonstandard_ratio: bool = False) -> dict:
+    return _inspect_remix_info(probe(path), path.stat().st_size, digest,
+                               max_duration=max_duration,
+                               allow_nonstandard_ratio=allow_nonstandard_ratio)
 
 
-def _inspect_remix_info(info: dict, size: int, digest: str, *, max_duration: int | None = 15) -> dict:
+def _inspect_remix_info(info: dict, size: int, digest: str, *, max_duration: int | None = 15,
+                        allow_nonstandard_ratio: bool = False) -> dict:
     if not 0 < size <= MAX_VIDEO_BYTES:
         raise ValueError("参考视频需要在 300 MB 以内")
     video = next((s for s in info["streams"] if s["codec_type"] == "video"), None)
     if not video:
         raise ValueError("未找到视频画面")
     seconds = float(video.get("duration") or info["format"]["duration"])
-    if not math.isfinite(seconds) or seconds < 4.9 or (max_duration is not None and seconds > max_duration + .1):
+    # Commerce uploads may have tail frames although the player displays 0:15.
+    # The working copy is trimmed to 15 seconds before dispatch.
+    tolerance = 1.0 if allow_nonstandard_ratio else .1
+    if not math.isfinite(seconds) or seconds < 4.9 or (max_duration is not None and seconds > max_duration + tolerance):
         raise ValueError(f"请上传至少 5 秒的参考视频" if max_duration is None else f"请上传 5–{max_duration} 秒的参考视频")
     width, height = video["width"], video["height"]
     if width <= 0 or height <= 0 or width * height > 9_000_000:
@@ -162,20 +205,27 @@ def _inspect_remix_info(info: dict, size: int, digest: str, *, max_duration: int
         rotation = int(side.get("rotation", rotation))
     if abs(rotation) % 180 == 90:
         width, height = height, width
-    ratio = "16:9" if width >= height else "9:16"
-    desired = 16 / 9 if width >= height else 9 / 16
-    if abs(width / height / desired - 1) > .08:
+    supported = {"16:9": 16 / 9, "9:16": 9 / 16}
+    if allow_nonstandard_ratio:
+        supported.update({"1:1": 1.0, "4:3": 4 / 3, "3:4": 3 / 4})
+    ratio = min(supported, key=lambda item: abs(width / height / supported[item] - 1))
+    if abs(width / height / supported[ratio] - 1) > .08:
+        if allow_nonstandard_ratio:
+            raise ValueError("当前电商复刻支持 16:9、9:16、1:1、4:3 或 3:4 画幅，请上传接近这些比例的视频")
         raise ValueError("当前复刻支持 16:9 横屏或 9:16 竖屏，请先裁切视频")
     return {
         "duration": max(5, math.ceil(seconds - .001)) if max_duration is None else min(max_duration, max(5, math.ceil(seconds - .001))),
         "source_seconds": seconds,
         "source_sha256": digest,
         "ratio": ratio,
+        "source_width": width,
+        "source_height": height,
         "has_audio": any(s["codec_type"] == "audio" for s in info["streams"]),
     }
 
 
-def inspect_remix(upload: UploadFile, *, max_duration: int | None = 15) -> dict:
+def inspect_remix(upload: UploadFile, *, max_duration: int | None = 15,
+                  allow_nonstandard_ratio: bool = False) -> dict:
     with tempfile.TemporaryDirectory(prefix="equai-probe-") as folder:
         path = Path(folder) / "source.mp4"
         upload.file.seek(0)
@@ -190,7 +240,8 @@ def inspect_remix(upload: UploadFile, *, max_duration: int | None = 15) -> dict:
                 digest.update(chunk)
                 dst.write(chunk)
         upload.file.seek(0)
-        return _inspect_remix_path(path, digest.hexdigest(), max_duration=max_duration)
+        return _inspect_remix_path(path, digest.hexdigest(), max_duration=max_duration,
+                                   allow_nonstandard_ratio=allow_nonstandard_ratio)
 
 
 def probe_remote(key: str) -> dict:
@@ -306,7 +357,8 @@ async def validate_commerce_remix_uploads(videos: list, images: list, raw_roles:
     if videos[0].size is not None and videos[0].size > MAX_VIDEO_BYTES:
         raise HTTPException(413, "参考视频不能超过 300 MB")
     try:
-        info = await asyncio.to_thread(inspect_remix, videos[0], max_duration=15)
+        info = await asyncio.to_thread(inspect_remix, videos[0], max_duration=15,
+                                       allow_nonstandard_ratio=True)
         # Container metadata for a nominal 15-second clip can run a few frames
         # long. H3 rejects generation durations above 15 even though upload
         # validation deliberately accepts that small recording tolerance.
@@ -821,7 +873,15 @@ def finalize_remix(row: dict, artifacts: list[dict]) -> list[dict]:
             command += ["-map", "0:v:0", "-map", "0:a?", "-c:a", "copy"]
         else:
             command += ["-map", "0:v:0", "-an"]
-        command += ["-c:v", "copy", "-t", str(settings["source_seconds"]), "-movflags", "+faststart", str(output)]
+        if settings.get("restore_source_size") and settings.get("source_width") and settings.get("source_height"):
+            width, height = int(settings["source_width"]), int(settings["source_height"])
+            if width < 2 or height < 2 or width * height > 9_000_000 or width % 2 or height % 2:
+                raise ValueError("原视频尺寸无法按原样交付，请使用偶数宽高的视频")
+            command += ["-vf", f"scale={width}:{height}:flags=lanczos,setsar=1",
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+        else:
+            command += ["-c:v", "copy"]
+        command += ["-t", str(settings["source_seconds"]), "-movflags", "+faststart", str(output)]
         subprocess.run(command, check=True, capture_output=True, timeout=180)
         actual = float(probe(output)["format"]["duration"])
         if actual < settings["source_seconds"] - .25:
@@ -834,6 +894,9 @@ async def create_image_edit(request: Request, merchant: Annotated[dict, Depends(
                             prompt: Annotated[str, Form()], images: Annotated[list[UploadFile] | None, File()] = None,
                             note: Annotated[str, Form()] = "",
                             direct_assets: Annotated[str, Form()] = "",
+                            model: Annotated[str, Form()] = "gpt-image-2",
+                            aspect_ratio: Annotated[str, Form()] = "auto",
+                            count: Annotated[int, Form()] = 1,
                             idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None) -> dict:
     from video_api import (_upload, _remove_uploaded_inputs, _get_task, _task_view,
                            direct_assets_as_uploads, _uploads_named)
@@ -846,23 +909,37 @@ async def create_image_edit(request: Request, merchant: Annotated[dict, Depends(
         if images:
             raise HTTPException(422, "直传素材不能与 multipart 素材混用")
         _staged_objects, staged = await direct_assets_as_uploads(
-            merchant["id"], "reference", direct_assets,
+            merchant["id"], "image-edit", direct_assets,
         )
         images = _uploads_named(staged, "images")
     settings = image_settings()
     if not settings["key"] or settings["price"] <= 0:
         raise HTTPException(503, "图片编辑正在配置中，暂未开放提交")
-    if len(images) > 4 or not 1 <= len(prompt.strip()) <= 8000 or len(note) > 80:
-        raise HTTPException(422, "图片最多 4 张，描述 1–8000 字，备注最多 80 字")
+    if not any(item["id"] == model for item in IMAGE_EDIT_MODELS):
+        raise HTTPException(422, "请选择当前支持的 GPT-image 2.0 模型")
+    if aspect_ratio not in IMAGE_EDIT_ASPECT_RATIOS:
+        raise HTTPException(422, "请选择有效的画面比例")
+    if not 1 <= count <= 20:
+        raise HTTPException(422, "生成张数需要在 1–20 张之间")
+    if len(images) > 10 or not 1 <= len(prompt.strip()) <= 20000 or len(note) > 80:
+        raise HTTPException(422, "参考图片最多 10 张，提示词 1–20000 字，备注最多 80 字")
+    if any(upload.size is not None and upload.size > MAX_IMAGE_EDIT_FILE_BYTES for upload in images):
+        raise HTTPException(422, "每张参考图片不能超过 20 MB")
     if idempotency_key and len(idempotency_key) > 180:
         raise HTTPException(422, "请求标识过长")
     normalized = []
     try:
         for upload in images:
-            normalized.append(await asyncio.to_thread(normalize_upload, upload))
+            data = await asyncio.to_thread(normalize_upload, upload)
+            if len(data) > MAX_IMAGE_EDIT_FILE_BYTES:
+                raise ValueError("每张参考图片处理后仍超过 20 MB，请缩小图片后重试")
+            normalized.append(data)
     except (OSError, ValueError, Image.DecompressionBombError):
-        raise HTTPException(422, "请上传有效的 PNG、JPG 或 WebP 图片，每张不超过 30 MB / 3200 万像素") from None
-    identity = hashlib.sha256(json.dumps([prompt.strip(), note, [hashlib.sha256(x).hexdigest() for x in normalized]], ensure_ascii=False).encode()).hexdigest()
+        raise HTTPException(422, "请上传有效的 PNG、JPG 或 WebP 图片，每张不超过 20 MB / 3200 万像素") from None
+    identity = hashlib.sha256(json.dumps([
+        prompt.strip(), note, model, aspect_ratio, count,
+        [hashlib.sha256(x).hexdigest() for x in normalized],
+    ], ensure_ascii=False).encode()).hexdigest()
     if idempotency_key:
         with connect() as db:
             existing = db.execute("SELECT * FROM merchant_tasks WHERE merchant_id=? AND idempotency_key=?", (merchant["id"], idempotency_key)).fetchone()
@@ -872,7 +949,9 @@ async def create_image_edit(request: Request, merchant: Annotated[dict, Depends(
             return _task_view(existing, with_download=False)
     if merchant["status"] != "active":
         raise HTTPException(403, "账户尚未启用或已暂停")
-    if merchant["balance_milli"] < settings["price"]:
+    unit_price = image_edit_site_price_milli(model)
+    reserved_price = unit_price * count
+    if merchant["balance_milli"] < reserved_price:
         raise HTTPException(402, "积分不足")
     task_id, objects = public_id("img"), []
     try:
@@ -882,25 +961,24 @@ async def create_image_edit(request: Request, merchant: Annotated[dict, Depends(
                 merchant["id"], task_id, i, "images", upload, force_local=True,
             ))
         now = time.time()
-        if normalized:
-            with Image.open(BytesIO(normalized[0])) as image:
-                ratios = {"1:1": 1, "3:2": 1.5, "4:3": 4/3, "5:4": 1.25, "16:9": 16/9,
-                          "21:9": 21/9, "2:3": 2/3, "3:4": .75, "4:5": .8, "9:16": 9/16, "9:21": 9/21}
-                ratio = min(ratios, key=lambda r: abs(ratios[r] - image.width / image.height))
-        else:
-            ratio = "1:1"
-        payload = {"_tool": "image_edit", "prompt": prompt.strip(), "_transfer_backend": transfer_storage.backend()}
+        ratio = aspect_ratio
+        payload = {
+            "_tool": "image_edit", "prompt": prompt.strip(),
+            "_image_edit": {"model": model, "aspect_ratio": aspect_ratio,
+                            "count": count, "unit_price_milli": unit_price},
+            "_transfer_backend": transfer_storage.backend(),
+        }
         with transaction() as db:
             db.execute("""INSERT INTO merchant_tasks
                 (id,merchant_id,kind,quality,duration,ratio,title,status,progress,message,payload,input_objects,
                  price_milli,failure_price_milli,idempotency_key,request_hash,created_at,queued_at,portal_note)
                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (task_id, merchant["id"], "image_edit", "image", 0, ratio, "图片编辑", "queued", 0, "图片已接收，等待处理",
-                 json.dumps(payload, ensure_ascii=False), json.dumps(objects), settings["price"], 0, idempotency_key, identity, now, now, note))
+                 json.dumps(payload, ensure_ascii=False), json.dumps(objects), reserved_price, 0, idempotency_key, identity, now, now, note))
             for item in objects:
                 db.execute("""INSERT INTO assets(id,merchant_id,task_id,role,bucket,object_key,filename,content_type,size_bytes,created_at)
                               VALUES(?,?,?,?,?,?,?,?,?,?)""", (item["id"], merchant["id"], task_id, "input", item["bucket"], item["key"], item["filename"], item["content_type"], item.get("size_bytes"), now))
-            reserve_task(db, merchant["id"], task_id, "图片编辑", amount_milli=settings["price"])
+            reserve_task(db, merchant["id"], task_id, "图片编辑", amount_milli=reserved_price)
     except Exception as exc:
         await _remove_uploaded_inputs(objects)
         if isinstance(exc, sqlite3.IntegrityError) and idempotency_key:
@@ -940,19 +1018,27 @@ def provider_image_payload(path: Path, index: int) -> tuple[bytes, str, str]:
     """Keep alpha lossless; shrink opaque photos before the external upload."""
     original = path.read_bytes()
     with Image.open(BytesIO(original)) as image:
+        source_format = (image.format or "").upper()
         has_alpha = (
             "A" in image.getbands()
             and image.getchannel("A").getextrema()[0] < 255
         )
         if has_alpha:
-            return original, f"{index}.png", "image/png"
+            if source_format == "PNG":
+                return original, f"{index}.png", "image/png"
+            output = BytesIO()
+            image.save(output, format="PNG")
+            return output.getvalue(), f"{index}.png", "image/png"
         output = BytesIO()
         image.convert("RGB").save(
             output, format="JPEG", quality=95, subsampling=0,
         )
     encoded = output.getvalue()
-    if len(encoded) >= len(original):
-        return original, f"{index}.png", "image/png"
+    supported = {"JPEG": ("jpg", "image/jpeg"), "PNG": ("png", "image/png"),
+                 "WEBP": ("webp", "image/webp"), "GIF": ("gif", "image/gif")}
+    if len(encoded) >= len(original) and source_format in supported:
+        extension, content_type = supported[source_format]
+        return original, f"{index}.{extension}", content_type
     return encoded, f"{index}.jpg", "image/jpeg"
 
 
@@ -1318,16 +1404,27 @@ async def dispatch_image(row: dict) -> None:
                 changed = db.execute("UPDATE merchant_tasks SET status='running',remote_id='image:submitting',started_at=?,progress=20,message='正在提交图片编辑' WHERE id=? AND status='dispatching'", (time.time(), row["id"]))
             if not changed.rowcount:
                 return
+            payload = json.loads(row["payload"])
+            options = payload.get("_image_edit") or {}
+            model = str(options.get("model") or settings["model"])
+            count = max(1, min(20, int(options.get("count") or 1)))
             response = await client.post(settings["base"] + "/v1/images/tasks", headers={**headers, "Idempotency-Key": row["id"]}, json={
-                "model": settings["model"], "prompt": json.loads(row["payload"])["prompt"],
-                "aspect_ratio": row["ratio"], "upload_ids": uploads, "image_urls": [], "count": 1,
+                "model": model, "prompt": payload["prompt"],
+                "aspect_ratio": str(options.get("aspect_ratio") or row["ratio"]),
+                "upload_ids": uploads, "image_urls": [], "count": count,
             })
             value = provider_data(response)
-            remote_id = provider_task_id(value)
-            if not remote_id:
+            remote_tasks = value.get("tasks")
+            remote_ids = [str(item.get("id") or item.get("task_id") or "")
+                          for item in remote_tasks if isinstance(item, dict)] if isinstance(remote_tasks, list) else []
+            if not remote_ids:
+                single = provider_task_id(value)
+                remote_ids = [single] if single else []
+            if len(remote_ids) != count or any(not item for item in remote_ids):
                 raise ValueError("图片服务未返回任务编号")
+            remote_value = "image:" + remote_ids[0] if count == 1 else "image:batch:" + json.dumps(remote_ids, separators=(",", ":"))
             with connect() as db:
-                db.execute("UPDATE merchant_tasks SET remote_id=?,progress=35,message='图片正在编辑' WHERE id=? AND status='running'", ("image:" + str(remote_id), row["id"]))
+                db.execute("UPDATE merchant_tasks SET remote_id=?,progress=35,message='图片正在编辑' WHERE id=? AND status='running'", (remote_value, row["id"]))
     except Exception as exc:
         # Never replay a possibly accepted provider request automatically.
         log.warning("Image edit dispatch failed for %s: %s", row["id"], type(exc).__name__)
@@ -1373,41 +1470,86 @@ async def poll_image(row: dict) -> None:
         if time.time() - (row["started_at"] or row["created_at"]) > 900:
             _terminal_failure(row["id"], "图片服务处理超时，积分已释放；可联系管理员核对结果", False)
             return
-        remote = row["remote_id"].removeprefix("image:")
-        if remote == "submitting":
+        remote_value = str(row["remote_id"] or "")
+        if remote_value == "image:submitting":
             return
+        if remote_value.startswith("image:batch:"):
+            try:
+                remote_ids = json.loads(remote_value.removeprefix("image:batch:"))
+            except json.JSONDecodeError:
+                _terminal_failure(row["id"], "图片任务编号异常，积分已释放", True)
+                return
+        else:
+            remote_ids = [remote_value.removeprefix("image:")]
         settings = image_settings()
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(settings["base"] + "/v1/images/tasks/" + quote(remote, safe=""), headers={"Authorization": f'Bearer {settings["key"]}'})
-        value = provider_data(response)
-        status = str(value.get("status", "")).lower()
-        if status in {"failed", "cancelled", "canceled"}:
-            _terminal_failure(row["id"], "图片编辑未成功，积分已释放；请调整素材或描述后重试", False)
+            responses = await asyncio.gather(*(
+                client.get(settings["base"] + "/v1/images/tasks/" + quote(str(remote), safe=""),
+                           headers={"Authorization": f'Bearer {settings["key"]}'})
+                for remote in remote_ids
+            ))
+        values = [provider_data(response) for response in responses]
+        statuses = [str(value.get("status", "")).lower() for value in values]
+        terminal = {"failed", "cancelled", "canceled", "completed", "succeeded", "success"}
+        completed_count = sum(status in terminal for status in statuses)
+        if completed_count < len(remote_ids):
+            progress = 35 + int(55 * completed_count / max(len(remote_ids), 1))
+            with connect() as db:
+                db.execute("UPDATE merchant_tasks SET progress=?,message=? WHERE id=? AND status='running'",
+                           (progress, f"图片生成中 · {completed_count}/{len(remote_ids)}", row["id"]))
             return
-        if status not in {"completed", "succeeded", "success"}:
+        successful = [(value, status) for value, status in zip(values, statuses)
+                      if status in {"completed", "succeeded", "success"}]
+        successful = [(value, status) for value, status in successful
+                      if str((value.get("result") or {}).get("url") or "").strip()]
+        if not successful:
+            _terminal_failure(row["id"], "图片编辑未成功，积分已释放；请调整素材或描述后重试", True)
             return
-        data = await fetch_image(str((value.get("result") or {}).get("url") or ""))
+        payload = json.loads(row["payload"] or "{}")
+        options = payload.get("_image_edit") or {}
+        unit_price = max(0, int(options.get("unit_price_milli") or settings["price"]))
+        artifacts = []
+        provider_billing = 0.0
         with tempfile.TemporaryDirectory(prefix="equai-image-result-") as directory:
-            output = Path(directory) / "edited.png"
-            with Image.open(BytesIO(data)) as image:
-                if image.width * image.height > 64_000_000:
-                    raise ValueError("图片结果尺寸过大")
-                image.convert("RGBA" if "A" in image.getbands() else "RGB").save(output, format="PNG")
-            artifact = await asyncio.to_thread(store_output, row, output, "image")
+            # Handle each result in turn so a 20-image batch cannot hold every
+            # full-resolution response in memory and pressure other API routes.
+            for index, (value, _status) in enumerate(successful, 1):
+                data = await fetch_image(str(value["result"]["url"]))
+                output = Path(directory) / f"edited-{index:02d}.png"
+                with Image.open(BytesIO(data)) as image:
+                    if image.width * image.height > 64_000_000:
+                        raise ValueError("图片结果尺寸过大")
+                    image.convert("RGBA" if "A" in image.getbands() else "RGB").save(output, format="PNG")
+                artifacts.append(await asyncio.to_thread(store_output, row, output, "image"))
+                try:
+                    provider_billing += float(((value.get("billing") or {}).get("amount")) or 0)
+                except (TypeError, ValueError):
+                    pass
         now, expiry = time.time(), time.time() + 72 * 3600
-        # The image service settles in CNY on its own task record. Nothing else
-        # reads it, so every image edit used to land in the admin cost report at
-        # zero -- 24 of 24 completed edits, while GPU work was accounted for.
-        try:
-            billing = float(((value.get("billing") or {}).get("amount")) or 0)
-        except (TypeError, ValueError):
-            billing = 0.0
         with transaction() as db:
-            changed = db.execute("UPDATE merchant_tasks SET status='completed',progress=100,message='图片编辑完成',artifacts=?,provider_billing=?,finished_at=?,input_expires_at=?,output_expires_at=? WHERE id=? AND status='running'", (json.dumps([artifact]), billing, now, now + 86400, expiry, row["id"]))
+            current_task = db.execute("SELECT * FROM merchant_tasks WHERE id=?", (row["id"],)).fetchone()
+            if not current_task or current_task["status"] != "running":
+                return
+            charged = unit_price * len(artifacts)
+            refund = max(0, int(current_task["price_milli"]) - charged)
+            if refund:
+                db.execute("UPDATE merchants SET balance_milli=balance_milli+?,reserved_milli=reserved_milli-?,updated_at=? WHERE id=?",
+                           (refund, refund, now, row["merchant_id"]))
+                _ledger(db, row["merchant_id"], "task_partial_refund", available_delta=refund,
+                        reserved_delta=-refund, task_id=row["id"], note="图片批量任务部分失败，退回失败张数积分")
+                db.execute("UPDATE merchant_tasks SET price_milli=? WHERE id=?", (charged, row["id"]))
+            changed = db.execute("UPDATE merchant_tasks SET status='completed',progress=100,message=?,artifacts=?,provider_billing=?,finished_at=?,input_expires_at=?,output_expires_at=? WHERE id=? AND status='running'", (
+                "图片编辑完成" if len(artifacts) == len(remote_ids) else f"图片编辑完成 · 成功 {len(artifacts)}/{len(remote_ids)} 张",
+                json.dumps(artifacts), provider_billing, now, now + 86400, expiry, row["id"]))
             if not changed.rowcount:
                 return
             db.execute("UPDATE assets SET expires_at=? WHERE task_id=? AND role='input'", (now + 86400, row["id"]))
-            db.execute("INSERT OR IGNORE INTO assets(id,merchant_id,task_id,role,bucket,object_key,filename,content_type,size_bytes,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (public_id("ast"), row["merchant_id"], row["id"], "output", "local" if artifact.get("storage") == "local" else artifact["bucket"], artifact.get("path") or artifact["key"], "edited.png", "image/png", artifact["size_bytes"], now, expiry))
+            for index, artifact in enumerate(artifacts, 1):
+                db.execute("INSERT OR IGNORE INTO assets(id,merchant_id,task_id,role,bucket,object_key,filename,content_type,size_bytes,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
+                    public_id("ast"), row["merchant_id"], row["id"], "output",
+                    "local" if artifact.get("storage") == "local" else artifact["bucket"],
+                    artifact.get("path") or artifact["key"], f"edited-{index:02d}.png",
+                    "image/png", artifact["size_bytes"], now, expiry))
             settle_task(db, row["id"], "success", note="图片编辑成功")
         from media_preview import warm_task_previews
-        asyncio.create_task(warm_task_previews(row["merchant_id"], row["id"], [artifact]))
+        asyncio.create_task(warm_task_previews(row["merchant_id"], row["id"], artifacts))

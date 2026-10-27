@@ -266,16 +266,17 @@ print(task["id"], task["status"])</code></pre></article>
         <div class="section-marker">APPS</div>
         <div class="section-copy">
           <h2>其他创作应用接口</h2>
-          <p>视频生成的商家 API Key 接口和查询方式已在上文说明。本节只补充尚未单独列出的电商复刻、数字人、视频编辑、图片编辑和音乐编辑接口。</p>
-          <div class="mode-note warning"><strong>认证边界</strong><span><code>/v1/...</code> 商家 API 使用 <code>Authorization: Bearer h3_live_...</code>；<code>/api/account/...</code> 控制台应用接口使用同源登录 Cookie <code>h3_merchant_session</code>，浏览器请求需带 <code>credentials: "same-origin"</code>。目前只有视频生成提供面向 API Key 的公开创建接口；其余应用接口不能用 API Key 直接调用。</span></div>
+          <p>视频生成的商家 API Key 接口和查询方式已在上文说明。本节补充电商复刻、数字人、视频编辑、图片编辑、音乐编辑及声音克隆接口。</p>
+          <div class="mode-note warning"><strong>认证边界</strong><span><code>/v1/...</code> 商家 API 使用 <code>Authorization: Bearer h3_live_...</code>；<code>/api/account/...</code> 控制台应用接口使用同源登录 Cookie <code>h3_merchant_session</code>，浏览器请求需带 <code>credentials: "same-origin"</code>。视频生成与声音克隆提供 API Key 创建接口；声音克隆仅在服务状态返回 <code>available=true</code> 后开放。</span></div>
           <div class="table-wrap api-table"><table>
             <thead><tr><th>应用</th><th>方法与路径</th><th>认证</th><th>关键字段</th></tr></thead>
             <tbody>
-              <tr><td>电商复刻</td><td><code>POST /api/account/commerce-remix/720p</code></td><td>控制台 Cookie</td><td><code>kind=reference</code>、<code>videos</code>、可重复的 <code>images</code>、<code>remix_roles</code>。</td></tr>
+              <tr><td>电商复刻</td><td><code>POST /api/account/commerce-remix/720p</code>（1.5 积分）或 <code>POST /api/account/commerce-remix/1080p</code>（2.5 积分）</td><td>控制台 Cookie</td><td><code>kind=reference</code>、<code>videos</code>、可重复的 <code>images</code>、<code>remix_roles</code>；按所选清晰度调用对应路径。</td></tr>
               <tr><td>数字人</td><td><code>POST /api/account/digital-human/720p</code></td><td>控制台 Cookie</td><td><code>mode=audio</code>、单个 <code>image</code>、单个 <code>audio</code>；可选 <code>ratio=16:9</code>/<code>9:16</code>（默认 16:9）和 <code>prompt</code>。附加提示词由 DeepSeek 与 H3 模板整合为一份完整的 Ref2VA 提示词，留空逐字沿用默认模板；人物、服装、背景与原声固定跟随上传素材，要求更换这些的内容不会生效；清晰度固定为 1M。</td></tr>
               <tr><td>视频编辑</td><td><code>POST /api/account/video-edits/720p</code></td><td>控制台 Cookie</td><td><code>kind=reference</code>、<code>videos</code>、<code>prompt</code>、<code>edit_mode</code>；可重复的 <code>images</code> 为参考图。</td></tr>
               <tr><td>图片编辑</td><td><code>POST /api/account/image-edits</code></td><td>控制台 Cookie</td><td><code>prompt</code> 必填；可重复的 <code>images</code> 最多 4 张，允许不上传图片而按描述生成。</td></tr>
               <tr><td>音乐编辑</td><td><code>POST /api/account/music</code></td><td>控制台 Cookie</td><td><code>source</code>、<code>style</code>、<code>voice</code>；可选 <code>prompt</code>、<code>lyrics</code>、<code>title</code>。</td></tr>
+              <tr><td>声音克隆</td><td><code>POST /v1/voice-clones</code><br><code>POST /api/account/voice-clones</code></td><td>API Key / 控制台 Cookie</td><td><code>voice</code> 音色参考、<code>text</code> 朗读内容；可选 <code>emotion</code> 情绪参考、<code>emotion_weight</code>（0–2）。两段参考各限 50 MB，取前 12 秒。先查询 <code>GET /v1/voice-clones/status</code>；任务状态查询 <code>GET /v1/voice-clones/{id}</code>，完成后通过 <code>GET /v1/voice-clones/{id}/audio</code> 获取 MP3。</td></tr>
             </tbody>
           </table></div>
           <h3>控制台请求格式</h3>

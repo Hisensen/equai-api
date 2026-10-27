@@ -86,6 +86,7 @@ class GongjiStatusTest(unittest.TestCase):
         import gongji
 
         async def check(mode: str) -> tuple:
+            profile = {**gongji._profile("720p"), "image": "digital-human-image"}
             with (
                 patch.dict(os.environ, {
                     "GONGJI_DIGITAL_HUMAN_IMAGE": "digital-human-image",
@@ -93,6 +94,8 @@ class GongjiStatusTest(unittest.TestCase):
                     "GONGJI_LONG_IMAGE": "existing-long-image",
                     "GONGJI_LONG_OVERLAY_KEY": "h3-long-worker.tar.gz",
                 }),
+                patch.object(gongji, "_select_available_profile", new_callable=AsyncMock,
+                             return_value=(profile, {"resource": {}, "mark": "mark"})),
                 patch.object(gongji, "_runtime_bundle_url", return_value="https://runtime.test/bundle") as runtime_bundle_url,
                 patch.object(gongji, "create_job", new_callable=AsyncMock, return_value=42) as create_job,
             ):
@@ -100,8 +103,10 @@ class GongjiStatusTest(unittest.TestCase):
                     "test-job", "test-merchant", {"mode": mode}, "local"
                 )
             self.assertEqual(result, 42)
+            selected_profile = create_job.await_args.kwargs.get("selected_profile")
             return (
                 create_job.await_args.kwargs["service_image"],
+                selected_profile["image"] if selected_profile else None,
                 runtime_bundle_url.call_count,
                 create_job.await_args.kwargs.get("start_script"),
                 create_job.await_args.kwargs["extra_env"],
@@ -110,15 +115,15 @@ class GongjiStatusTest(unittest.TestCase):
         self.assertEqual(
             asyncio.run(check("digital_human_workflow")),
             (
-                "digital-human-image", 0, None,
+                "digital-human-image", "digital-human-image", 0, None,
                 [{"name": "H3_LONG_MAX_DURATION_SECONDS", "value": "45"}],
             ),
         )
         long_video = asyncio.run(check("long_text"))
-        self.assertEqual(long_video[0:2], ("existing-long-image", 1))
-        self.assertIn("H3_LONG_OVERLAY_URL", long_video[3][1]["name"])
-        self.assertEqual(long_video[3][1]["value"], "https://runtime.test/bundle")
-        self.assertEqual(long_video[2]["command"], ["/bin/bash"])
+        self.assertEqual(long_video[0:3], ("existing-long-image", None, 1))
+        self.assertIn("H3_LONG_OVERLAY_URL", long_video[4][1]["name"])
+        self.assertEqual(long_video[4][1]["value"], "https://runtime.test/bundle")
+        self.assertEqual(long_video[3]["command"], ["/bin/bash"])
 
     def test_digital_human_skips_automatic_standard_overlay(self) -> None:
         import gongji
@@ -150,6 +155,83 @@ class GongjiStatusTest(unittest.TestCase):
         self.assertNotIn("start_script", service)
         self.assertNotIn("H3_STANDARD_OVERLAY_URL", env_names)
         self.assertNotIn("H3_LONG_OVERLAY_URL", env_names)
+
+    def test_baked_standard_worker_skips_tencent_runtime_download(self) -> None:
+        import gongji
+
+        client = FakeCreateClient()
+        with (
+            patch.object(gongji, "TOKEN", "test-token"),
+            patch.object(gongji, "_select_available_profile", new_callable=AsyncMock, return_value=(
+                {
+                    **gongji._profile("1080p"),
+                    "image": "worker:standard-v9-r50-1080-baked-runtime-20261007-v1",
+                },
+                {"resource": {}, "mark": "mark"},
+            )),
+            patch.object(gongji, "_output_upload_targets", return_value=[]),
+            patch.object(gongji, "_result_upload_target", return_value={"key": "_job_result.json", "url": "https://upload.invalid"}),
+            patch.object(gongji.httpx, "AsyncClient", return_value=client),
+            patch.object(gongji.os.path, "isfile", return_value=True),
+            patch.object(gongji, "_runtime_bundle_url", return_value="https://runtime.test/bundle") as runtime_bundle_url,
+            patch.dict(os.environ, {
+                "GONGJI_1080_IMAGE": "worker:standard-v9-r50-1080-baked-runtime-20261007-v1",
+                "GONGJI_1080_STORAGE_ID": "2593",
+                "GONGJI_STANDARD_OVERLAY_KEY": "standard-worker.tar.gz",
+                "H3_LOCAL_RUNTIME_OVERLAY_PATH": "/data/runtime/h3-worker.tar.gz",
+            }),
+        ):
+            result = asyncio.run(gongji.create_job(
+                "highres-job", "merchant", {"mode": "first_last_frame"}, "1080p", "local",
+            ))
+
+        service = client.payload["services"][0]
+        env_names = {item["name"] for item in service["env"]}
+        self.assertEqual(result, 321)
+        self.assertIn("baked-runtime", service["service_image"])
+        self.assertEqual(runtime_bundle_url.call_count, 0)
+        self.assertNotIn("start_script", service)
+        self.assertNotIn("H3_STANDARD_OVERLAY_URL", env_names)
+
+    def test_sage_attention_compatibility_is_scoped_to_5090(self) -> None:
+        import gongji
+
+        async def submit(gpu_name: str) -> str:
+            client = FakeCreateClient()
+            profile = {**gongji._profile("2k"), "gpu": gpu_name, "image": "test-worker"}
+            with (
+                patch.object(gongji, "TOKEN", "test-token"),
+                patch.object(gongji, "_select_available_profile", new_callable=AsyncMock,
+                             return_value=(profile, {"resource": {}, "mark": "mark"})),
+                patch.object(gongji, "_output_upload_targets", return_value=[]),
+                patch.object(gongji, "_result_upload_target", return_value={"key": "result", "url": "https://upload.invalid"}),
+                patch.object(gongji.httpx, "AsyncClient", return_value=client),
+                patch.dict(os.environ, {
+                    "GONGJI_2K_IMAGE": "test-worker",
+                    "GONGJI_2K_STORAGE_ID": "2593",
+                }, clear=False),
+            ):
+                os.environ.pop("H3_USE_SAGE_ATTENTION", None)
+                os.environ.pop("H3_5090_USE_SAGE_ATTENTION", None)
+                await gongji.create_job("job", "merchant", {"mode": "video"}, "2k")
+            return next(
+                item["value"] for item in client.payload["services"][0]["env"]
+                if item["name"] == "H3_USE_SAGE_ATTENTION"
+            )
+
+        self.assertEqual(asyncio.run(submit("4090-48G")), "1")
+        self.assertEqual(asyncio.run(submit("5090")), "0")
+
+    def test_all_baked_standard_tiers_are_marked_as_self_contained(self) -> None:
+        import gongji
+
+        for quality in ("720", "1080", "2k"):
+            self.assertTrue(gongji._image_has_baked_standard_runtime(
+                f"harbor.suanleme.cn/h3platform/h3-video-worker:standard-{quality}-baked-runtime-v1"
+            ))
+        self.assertFalse(gongji._image_has_baked_standard_runtime(
+            "harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-720-ref1-6step-io"
+        ))
 
     def status(
         self, job_state: str, node_status: str = "End", reason=None,
@@ -264,6 +346,24 @@ class GongjiStatusTest(unittest.TestCase):
         self.assertEqual(task_id, 123)
         self.assertEqual(create.await_args.kwargs["workload"], "remix")
         self.assertEqual(create.await_args.kwargs["task_prefix"], "qwen-remix")
+
+    def test_music_job_keeps_the_music_image_entrypoint(self) -> None:
+        import gongji
+
+        create = AsyncMock(return_value=456)
+        with patch.object(gongji, "create_job", create), patch.dict(os.environ, {
+            "GONGJI_MUSIC_IMAGE": "registry.example/music-worker:test",
+            "GONGJI_MUSIC_TIMEOUT_SEC": "3600",
+        }, clear=False):
+            task_id = asyncio.run(gongji.create_music_job(
+                "mus_test", "merchant_test", {"lyrics": "test"}, "local",
+            ))
+        self.assertEqual(task_id, 456)
+        self.assertEqual(create.await_args.kwargs["service_image"], "registry.example/music-worker:test")
+        self.assertEqual(create.await_args.kwargs["start_script"], {
+            "command": ["python3"], "args": ["/app/worker.py"],
+        })
+        self.assertEqual(create.await_args.kwargs["task_prefix"], "h3-music")
 
     def test_commerce_remix_uses_one_worker_job_with_runtime_overlay(self) -> None:
         import gongji

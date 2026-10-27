@@ -139,12 +139,26 @@ async def run_video_template(
     prompts: Annotated[str, Form()],
     note: Annotated[str, Form()] = "",
     images: Annotated[list[UploadFile] | None, File()] = None,
+    direct_assets: Annotated[str, Form()] = "",
 ) -> dict:
     """One task per non-empty prompt line; optional pictures apply to every line (图1, 图2 …)."""
+    raise HTTPException(503, "视频编辑暂不开放，恢复后再试")
+
     from commerce import normalize_upload, normalized_upload
     from database import public_id
     from reenact import templates
-    from video_api import _remove_uploaded_inputs, _upload
+    from video_api import (
+        _remove_uploaded_inputs, _upload, direct_assets_as_uploads, _uploads_named,
+    )
+
+    images = images or []
+    if direct_assets:
+        if images:
+            raise HTTPException(422, "模板图片不能同时使用直传和 multipart 上传")
+        _staged, staged = await direct_assets_as_uploads(
+            merchant["id"], "reference", direct_assets,
+        )
+        images = _uploads_named(staged, "images")
 
     lines = [line.strip() for line in prompts.splitlines() if line.strip()]
     if not lines:

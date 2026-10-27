@@ -1,0 +1,8 @@
+ARG BASE_IMAGE=equai-api:digital-human-baked-20261006-v3-ratio-prompt
+FROM ${BASE_IMAGE}
+
+# Minimal API-side change: route high-resolution tasks to the self-contained
+# Worker images and skip their legacy Tencent runtime download.
+COPY gongji.py /app/gongji.py
+
+LABEL org.opencontainers.image.title="Equai API with baked high-resolution Worker routing"

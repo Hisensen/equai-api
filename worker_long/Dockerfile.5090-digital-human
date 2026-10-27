@@ -1,0 +1,63 @@
+# RTX 5090 sibling of the validated dedicated digital-human 4090 worker.
+# Keep the workflow, custom nodes, and model layout from the original image;
+# only replace the shadowing Ada-only CUDA extension and restore the baked venv
+# when the batch platform overrides PATH.
+ARG BASE_IMAGE=harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-720-ref1-6step-dh-wf-v1-20261006-ckattn-baked-v4-ratio-prompt
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+
+USER root
+
+RUN /opt/venv/bin/python - <<'PYCODE'
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
+from urllib.request import urlopen
+from zipfile import ZipFile
+
+url = (
+    "https://files.pythonhosted.org/packages/80/f9/"
+    "83cd0892c30bde91665b267ce8ce5b9f43cf48185cac579abd9d5c831827/"
+    "comfy_kitchen-0.2.32-cp312-abi3-manylinux_2_27_x86_64."
+    "manylinux_2_28_x86_64.whl"
+)
+expected_sha256 = "e60d87e2f63703dccf8ce76ce0b9118042306388b39a9605c0748e56c0bb85d4"
+wheel = urlopen(url, timeout=120).read()
+actual_sha256 = sha256(wheel).hexdigest()
+if actual_sha256 != expected_sha256:
+    raise SystemExit(f"comfy-kitchen wheel checksum mismatch: {actual_sha256}")
+with ZipFile(BytesIO(wheel)) as archive:
+    extension = archive.read("comfy_kitchen/backends/cuda/_C.abi3.so")
+
+required = (b"sol_attn_plan", b"sol_producer_begin", b"sol_producer_chunk",
+            b"sol_attn_core", b"sm_120")
+missing = [item.decode() for item in required if item not in extension]
+if missing:
+    raise SystemExit(f"official CUDA extension is missing required symbols: {missing}")
+for target in (
+    Path("/opt/vsa-overlay/comfy_kitchen/backends/cuda/_C.abi3.so"),
+    Path("/opt/venv/lib/python3.13/site-packages/comfy_kitchen/backends/cuda/_C.abi3.so"),
+):
+    if not target.is_file():
+        raise SystemExit(f"expected comfy-kitchen extension not found: {target}")
+    target.write_bytes(extension)
+    print(f"installed verified comfy-kitchen 0.2.32 extension ({len(extension)} bytes): {target}")
+
+entrypoint = Path("/app/entrypoint.sh")
+script = entrypoint.read_text()
+needle = "set -euo pipefail\n"
+addition = needle + "\n# The batch runtime can replace PATH; use this image's baked Python environment.\nif [[ -x /opt/venv/bin/python ]]; then\n  export PATH=\"/opt/venv/bin:$PATH\"\nfi\n"
+if "/opt/venv/bin:$PATH" not in script:
+    if script.count(needle) != 1:
+        raise SystemExit("Unexpected entrypoint layout; refusing to patch PATH")
+    entrypoint.write_text(script.replace(needle, addition, 1))
+PYCODE
+
+ENV H3_GPU_TARGET=5090
+
+LABEL org.opencontainers.image.title="Equai H3 digital-human worker for RTX 5090" \
+      org.opencontainers.image.description="RTX 5090 sibling of the dedicated 4090 digital-human worker; preserves its workflow and adds Sol-Attn CUDA support with sm_120" \
+      org.equai.gpu.target="5090" \
+      org.equai.sol-attn="comfy-kitchen-0.2.32-cuda-sm120" \
+      org.equai.workload="digital-human" \
+      org.equai.base.image="${BASE_IMAGE}"

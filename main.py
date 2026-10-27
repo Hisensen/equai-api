@@ -33,6 +33,7 @@ from video_project_api import router as video_project_router
 from commerce import router as commerce_router
 from long_video_api import router as long_video_router
 from music_api import router as music_router
+from voice_clone_api import router as voice_clone_router
 
 log = logging.getLogger("h3.api")
 
@@ -59,18 +60,23 @@ def _storage_csp_sources() -> list[str]:
             and safe_component.fullmatch(parsed.hostname)
         ):
             sources.append(f"https://{parsed.hostname}")
-    for relay in (os.getenv("H3_UPLOAD_RELAY_BASE_URL", "").strip(), os.getenv("H3_UPLOAD_RELAY_FALLBACK_URL", "").strip(),
-                  os.getenv("COS_DOWNLOAD_RELAY", "").strip()):
-        if not relay:
+    # Browser uploads may go directly to a dedicated HTTPS origin before
+    # falling back to the site origin. It must be in connect-src or the
+    # browser blocks the XHR before CORS or the upload endpoint can handle it.
+    for origin in (os.getenv("H3_UPLOAD_BASE_URL", "").strip(),
+                   os.getenv("H3_UPLOAD_RELAY_BASE_URL", "").strip(),
+                   os.getenv("H3_UPLOAD_RELAY_FALLBACK_URL", "").strip(),
+                   os.getenv("COS_DOWNLOAD_RELAY", "").strip()):
+        if not origin:
             continue
-        parsed = urlsplit(relay if "://" in relay else f"https://{relay}")
+        parsed = urlsplit(origin if "://" in origin else f"https://{origin}")
         if (
             parsed.scheme == "https"
             and parsed.hostname
-            and parsed.port is None
             and safe_component.fullmatch(parsed.hostname)
         ):
-            sources.append(f"https://{parsed.hostname}")
+            port = f":{parsed.port}" if parsed.port and parsed.port != 443 else ""
+            sources.append(f"https://{parsed.hostname}{port}")
     return list(dict.fromkeys(sources))
 
 
@@ -83,7 +89,9 @@ async def lifespan(_: FastAPI):
         asyncio.create_task(scheduler.dispatch_loop("remix"), name="h3-remix-dispatch"),
         asyncio.create_task(scheduler.dispatch_loop("reenact"), name="h3-reenact-dispatch"),
         asyncio.create_task(scheduler.dispatch_loop("music"), name="h3-music-dispatch"),
+        asyncio.create_task(scheduler.dispatch_loop("voice_clone"), name="h3-voice-clone-dispatch"),
         asyncio.create_task(scheduler.poll_loop(), name="h3-poll"),
+        asyncio.create_task(scheduler.poll_loop(music_only=True), name="h3-music-poll"),
         asyncio.create_task(scheduler.cleanup_loop(), name="h3-cleanup"),
         asyncio.create_task(scheduler.backup_loop(), name="h3-backup"),
     ]
@@ -124,6 +132,7 @@ app.include_router(video_project_router)
 app.include_router(commerce_router)
 app.include_router(long_video_router)
 app.include_router(music_router)
+app.include_router(voice_clone_router)
 
 
 @app.get("/admin/login", include_in_schema=False)

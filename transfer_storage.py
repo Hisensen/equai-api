@@ -27,13 +27,10 @@ def runtime_root() -> Path:
 PUBLIC_BASE_URL = (
     os.getenv("H3_TRANSFER_BASE_URL") or os.getenv("H3_PUBLIC_BASE_URL", "")
 ).rstrip("/")
-# Optional dedicated upload origin. Pointing this at a Guangzhou endpoint
-# removes an extra proxy hop while downloads and task APIs keep their public
-# origin. It falls back to the existing public origin until DNS and TLS are
-# configured for the dedicated host.
-UPLOAD_BASE_URL = (
-    os.getenv("H3_UPLOAD_BASE_URL") or PUBLIC_BASE_URL
-).rstrip("/")
+# Browser media uploads must use the dedicated Tencent endpoint. Never fall
+# back to the public website/API origin: that would silently proxy file bytes
+# through equai.vip and make upload latency/network routing unpredictable.
+UPLOAD_BASE_URL = os.getenv("H3_UPLOAD_BASE_URL", "").rstrip("/")
 MAX_GRANT_SECONDS = int(os.getenv("H3_TRANSFER_MAX_GRANT_SECONDS", str(26 * 3600)))
 
 
@@ -86,6 +83,8 @@ def create_browser_upload_grant(
     merchant_id: str, field: str, filename: str, content_type: str,
     size_bytes: int, *, expires: int = 3600,
 ) -> dict:
+    if not UPLOAD_BASE_URL:
+        raise RuntimeError("H3_UPLOAD_BASE_URL 必须配置为腾讯云直传地址")
     safe_name = Path(filename).name[:180] or "asset"
     key = f"staged/{merchant_id}/{uuid.uuid4().hex}/{safe_name}"
     value = {
@@ -98,7 +97,10 @@ def create_browser_upload_grant(
         # round trips for large browser uploads. The browser receives these
         # values in the signed grant and can resume/retry individual parts.
         "chunk_bytes": 8 * 1024 * 1024,
-        "parallelism": 4,
+        # Nine reference images can be staged together. Keep each image to
+        # two concurrent chunks so the bounded file pool improves throughput
+        # without multiplying into dozens of simultaneous writes.
+        "parallelism": 2 if field in {"images", "first_frame", "last_frame"} else 4,
     }
     value["signature"] = hmac.new(
         _secret(), json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -108,12 +110,6 @@ def create_browser_upload_grant(
         json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
     ).decode().rstrip("=")
     value["upload_url"] = f"{UPLOAD_BASE_URL}/internal/uploads?token={token}"
-    # Keep the normal public origin as a last-resort fallback.  Mainland
-    # users usually reach the dedicated Tencent upload origin faster, while
-    # a mobile carrier or corporate network may only allow the public site
-    # origin.  Both URLs use the same signed grant and local disk target.
-    if PUBLIC_BASE_URL and PUBLIC_BASE_URL != UPLOAD_BASE_URL:
-        value["fallback_upload_url"] = f"{PUBLIC_BASE_URL}/internal/uploads?token={token}"
     return value
 
 

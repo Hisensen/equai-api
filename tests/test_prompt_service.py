@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -36,6 +37,7 @@ from prompt_service import (  # noqa: E402
     public_settings,
     resolve_mode,
     save_settings,
+    save_merchant_override,
 )
 from prompt_templates import MODE_TEMPLATES, digital_human_h3_prompt  # noqa: E402
 
@@ -51,6 +53,37 @@ class PromptServiceTest(unittest.TestCase):
             base_url="https://api.deepseek.com",
             api_key="unit-test-secret-key",
         )
+
+    def test_ryan_override_routes_only_his_task_to_grok(self) -> None:
+        merchant_id = public_id("mrc")
+        with connect() as db:
+            db.execute(
+                """INSERT INTO merchants(id,username,password_hash,recovery_hash,status,
+                balance_milli,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)""",
+                (merchant_id, "Ryan258-routing-test", "hash", "hash", "active",
+                 1000, 1, 1),
+            )
+            db.commit()
+        save_settings(enabled=True, base_url="https://api.deepseek.com",
+                      api_key="deepseek-test-key")
+        save_merchant_override(
+            merchant_id=merchant_id, base_url="https://api.router.one/v1",
+            model="grok-4.7", api_key="grok-test-key",
+        )
+        with patch.object(prompt_service, "_call_provider", new=AsyncMock(return_value="compiled")) as provider:
+            asyncio.run(compile_prompt(kind="text", brief="普通用户的画面", duration=5,
+                                       ratio="16:9", inputs=[], merchant_id="another-merchant"))
+            asyncio.run(compile_prompt(kind="text", brief="Ryan 的画面", duration=5,
+                                       ratio="16:9", inputs=[], merchant_id=merchant_id))
+        normal, ryan = [call.args[0] for call in provider.await_args_list]
+        self.assertEqual(normal["base_url"], "https://api.deepseek.com")
+        self.assertEqual(normal["model"], prompt_service.MODEL)
+        self.assertEqual(ryan["base_url"], "https://api.router.one/v1")
+        self.assertEqual(ryan["model"], "grok-4.7")
+        with connect() as db:
+            stored = db.execute("SELECT api_key_ciphertext FROM prompt_service_overrides WHERE merchant_id=?",
+                                (merchant_id,)).fetchone()[0]
+        self.assertNotIn("grok-test-key", stored)
 
     def test_mode_router_is_hard_coded(self) -> None:
         self.assertEqual(resolve_mode("text", []), "T2VA")
@@ -130,6 +163,76 @@ class PromptServiceTest(unittest.TestCase):
                 "test request",
             ))
         self.assertEqual(captured["temperature"], 0)
+
+    def test_deepseek_failure_uses_qwen_fallback_for_same_prompt_integration(self) -> None:
+        calls = []
+        compiled = (
+            "integrated_multimodal_description: A fox runs through the rain.\n\n"
+            "overall_soundscape: Rain and footsteps.\n\n"
+            "non_diegetic_music: N/A"
+        )
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def post(self, url, **kwargs):
+                calls.append((url, kwargs))
+                if "api.deepseek.com" in url:
+                    return httpx.Response(503, json={"error": {"message": "busy"}})
+                return httpx.Response(200, json={
+                    "choices": [{"finish_reason": "stop", "message": {"content": compiled}}],
+                })
+
+        with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "qwen-test-key"}), \
+             patch.object(prompt_service.httpx, "AsyncClient", return_value=FakeClient()), \
+             patch.object(prompt_service.asyncio, "sleep", new=AsyncMock()):
+            result = asyncio.run(prompt_service._call_provider(
+                {"base_url": "https://api.deepseek.com", "api_key": "deepseek-test-key"},
+                "T2VA", "test request",
+            ))
+
+        self.assertEqual(result, compiled)
+        self.assertEqual(calls[-1][1]["json"]["model"], "qwen-plus")
+        self.assertNotIn("thinking", calls[-1][1]["json"])
+        self.assertEqual(
+            calls[-1][1]["json"]["messages"], calls[0][1]["json"]["messages"]
+        )
+
+    def test_ryan_grok_failure_uses_qwen_not_deepseek(self) -> None:
+        calls = []
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def post(self, url, **kwargs):
+                calls.append((url, kwargs["json"]))
+                if "router.one" in url:
+                    return httpx.Response(503, json={"error": {"message": "busy"}})
+                return httpx.Response(200, json={
+                    "choices": [{"finish_reason": "stop", "message": {"content": "compiled"}}],
+                })
+
+        with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "qwen-test-key"}), \
+             patch.object(prompt_service.httpx, "AsyncClient", return_value=FakeClient()), \
+             patch.object(prompt_service.asyncio, "sleep", new=AsyncMock()):
+            result = asyncio.run(prompt_service._call_provider(
+                {"base_url": "https://api.router.one/v1", "api_key": "grok-key",
+                 "model": "grok-4.7"}, "T2VA", "Ryan request",
+            ))
+        self.assertEqual(result, "compiled")
+        self.assertTrue(all("deepseek" not in url for url, _ in calls))
+        self.assertEqual(calls[0][1]["model"], "grok-4.7")
+        self.assertNotIn("thinking", calls[0][1])
+        self.assertEqual(calls[-1][1]["model"], "qwen-plus")
+        self.assertEqual(calls[0][1]["messages"], calls[-1][1]["messages"])
 
     def test_asset_manifest_preserves_names_aliases_and_independent_numbers(self) -> None:
         result = asset_manifest("Ref2VA", [
@@ -515,6 +618,67 @@ class PromptServiceTest(unittest.TestCase):
         self.assertEqual(task["billing_status"], "released")
         self.assertEqual(merchant["balance_milli"], 5000)
         self.assertEqual(merchant["reserved_milli"], 0)
+
+    def test_transient_prompt_provider_failure_requeues_without_skipping_integration(self) -> None:
+        merchant_id = public_id("mer")
+        task_id = public_id("vid")
+        now = __import__("time").time()
+        with connect() as db:
+            db.execute(
+                """INSERT INTO merchants
+                (id,username,password_hash,recovery_hash,status,balance_milli,reserved_milli,
+                 consecutive_failures,max_concurrency,created_at,updated_at,activated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    merchant_id, merchant_id, "unused", "unused", "active", 5000, 0,
+                    0, 4, now, now, now,
+                ),
+            )
+            db.execute(
+                """INSERT INTO merchant_tasks
+                (id,merchant_id,kind,quality,duration,ratio,title,status,progress,message,payload,
+                 input_objects,price_milli,failure_price_milli,created_at,queued_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    task_id, merchant_id, "text", "720p", 5, "16:9", "prompt retry",
+                    "dispatching", 10, "正在整理生成描述",
+                    '{"prompt":"simple request","_transfer_backend":"local"}', "[]",
+                    1000, 100, now, now,
+                ),
+            )
+            reserve_task(db, merchant_id, task_id, "720p")
+            row = dict(db.execute(
+                "SELECT * FROM merchant_tasks WHERE id=?", (task_id,)
+            ).fetchone())
+
+        gpu = AsyncMock()
+        with (
+            patch.object(scheduler, "_claim_next", return_value=row),
+            patch.object(
+                scheduler.prompt_service,
+                "compile_prompt",
+                AsyncMock(side_effect=PromptServiceError(
+                    "提示词服务返回 HTTP 503", retryable=True,
+                )),
+            ),
+            patch.object(scheduler.gongji, "create_job", gpu),
+        ):
+            self.assertFalse(asyncio.run(scheduler._dispatch_once()))
+
+        gpu.assert_not_awaited()
+        with connect() as db:
+            task = db.execute(
+                "SELECT * FROM merchant_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            merchant = db.execute(
+                "SELECT * FROM merchants WHERE id=?", (merchant_id,)
+            ).fetchone()
+        self.assertEqual(task["status"], "queued")
+        self.assertIn("自动重试", task["message"])
+        self.assertGreater(task["queued_at"], now)
+        self.assertEqual(task["billing_status"], "reserved")
+        self.assertEqual(merchant["reserved_milli"], 1000)
+        self.assertEqual(json.loads(task["payload"])["_prompt_retry_count"], 1)
 
     def test_merchant_is_suspended_on_tenth_consecutive_runtime_failure(self) -> None:
         self.assertEqual(CONSECUTIVE_FAILURE_LIMIT, 10)

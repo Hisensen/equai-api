@@ -49,6 +49,10 @@ class GongjiError(RuntimeError):
     pass
 
 
+class NoGpuAvailableError(GongjiError):
+    """No configured region currently reports an available GPU."""
+
+
 def _direct_local_media_urls(worker_input: dict[str, Any], backend: str) -> dict[str, Any]:
     """Use the TLS-valid transfer IP for signed assets sent to GPU workers.
 
@@ -121,6 +125,7 @@ def _profile(quality: str, workload: str = "video") -> dict[str, Any]:
         "estimated_sec": os.getenv("GONGJI_ESTIMATED_SEC", str(ESTIMATED_SEC)),
         "timeout_sec": os.getenv("GONGJI_TIMEOUT_SEC", str(TIMEOUT_SEC)),
     }
+
     def configured_value(suffix: str, default: Any) -> Any:
         # A dedicated workload may override only the region/storage while
         # inheriting the validated worker image and sampler settings.
@@ -141,6 +146,17 @@ def _profile(quality: str, workload: str = "video") -> dict[str, Any]:
         "estimated_sec": int(configured_value("_ESTIMATED_SEC", defaults["estimated_sec"])),
         "timeout_sec": int(configured_value("_TIMEOUT_SEC", defaults["timeout_sec"])),
     }
+
+
+def _image_has_baked_standard_runtime(image: str | None) -> bool:
+    """Return whether a standard video image contains its Worker runtime.
+
+    Images tagged with ``-baked-runtime-`` carry the API/transfer code and
+    custom nodes directly in the image, so they must not download the legacy
+    Tencent-hosted runtime overlay at pod startup.
+    """
+    reference = str(image or "").rsplit("/", 1)[-1].lower()
+    return "-baked-runtime-" in reference
 
 
 def configured(quality: str | None = None) -> bool:
@@ -192,6 +208,107 @@ async def _resource(profile: dict[str, Any]) -> dict[str, Any]:
     raise GongjiError(
         f'未找到匹配资源: {profile["region"]} {profile["gpu"]} ×{profile["gpu_count"]}'
     )
+
+
+def _backup_profile(
+    profile: dict[str, Any], quality: str, workload: str,
+    backup_prefix: str | None = None,
+) -> dict[str, Any] | None:
+    """Build an optional, per-tier backup profile without changing other workers.
+
+    Example for ordinary 720p jobs:
+      GONGJI_720_BACKUP_REGION_NAME=天津一区
+      GONGJI_720_BACKUP_GPU_NAME=5090
+      GONGJI_720_BACKUP_GPU_COUNT=1
+      GONGJI_720_BACKUP_CPU_CORES=16
+      GONGJI_720_BACKUP_STORAGE_ID=<Tianjin storage id>
+      GONGJI_720_BACKUP_IMAGE=<Tianjin-compatible image>
+
+    Remix profiles use GONGJI_REMIX_720_BACKUP_* instead.
+    """
+    prefix = backup_prefix or (
+        {"720p": "GONGJI_720", "1080p": "GONGJI_1080", "2k": "GONGJI_2K"}[quality]
+        if workload == "video"
+        else {"720p": "GONGJI_REMIX_720", "1080p": "GONGJI_REMIX_1080", "2k": "GONGJI_REMIX_2K"}[quality]
+    ) + "_BACKUP"
+    region = os.getenv(prefix + "_REGION_NAME", "").strip()
+    gpu = os.getenv(prefix + "_GPU_NAME", "").strip()
+    if not region and not gpu:
+        return None
+    if not region or not gpu:
+        raise GongjiError(f"{prefix} 备用区域和 GPU 型号必须同时配置")
+    count = int(os.getenv(prefix + "_GPU_COUNT", "1"))
+    cpu_raw = os.getenv(prefix + "_CPU_CORES", "").strip()
+    storage_raw = os.getenv(prefix + "_STORAGE_ID", "").strip()
+    solattn = os.getenv(prefix + "_SOLATTN", "").strip()
+    if not solattn:
+        # The 5090 sibling image ships the ABI-matched Comfy Kitchen CUDA
+        # extension with Sol-Attn kernels and native sm_120 support, so inherit
+        # the same configured Sol-Attn mode as the primary unless explicitly
+        # overridden for this backup profile.
+        solattn = profile["solattn"]
+    return {
+        **profile,
+        "region": region,
+        "gpu": gpu,
+        "gpu_count": count,
+        "cpu_cores": int(cpu_raw) if cpu_raw else None,
+        "storage_id": int(storage_raw) if storage_raw else 0,
+        "image": os.getenv(prefix + "_IMAGE", "").strip(),
+        "solattn": solattn,
+        "_backup": True,
+    }
+
+
+async def _select_available_profile(
+    profile: dict[str, Any], quality: str, workload: str,
+    *, backup_prefix: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Pick the first configured profile with live inventory, primary first.
+
+    Inventory is intentionally fetched for every submission; resource marks can
+    be cached, but a 30-minute inventory cache would send users into known-empty
+    regions. The selected Job still contains exactly one region.
+    """
+    candidates = [profile]
+    backup = _backup_profile(profile, quality, workload, backup_prefix=backup_prefix)
+    if backup:
+        candidates.append(backup)
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        data = _unwrap(await client.get(f"{BASE}/api/deployment/resource/search", headers=_headers()))
+
+    results = (data or {}).get("results") or []
+    for candidate in candidates:
+        for item in results:
+            for region in (item.get("region_map") or {}).values():
+                mark = region.get("mark") or {}
+                resource = mark.get("resource") or {}
+                if (
+                    region.get("region_name") != candidate["region"]
+                    or resource.get("gpu_name") != candidate["gpu"]
+                    or int(resource.get("gpu_count") or 0) != candidate["gpu_count"]
+                ):
+                    continue
+                cpu_cores = candidate.get("cpu_cores")
+                if cpu_cores is not None and int(resource.get("cpu_cores") or 0) != cpu_cores:
+                    continue
+                try:
+                    inventory = int(region.get("inventory"))
+                except (TypeError, ValueError):
+                    # Unknown inventory is not proof that a card is available.
+                    continue
+                if inventory < 1:
+                    continue
+                if candidate.get("_backup") and (
+                    not candidate.get("image") or not candidate.get("storage_id")
+                ):
+                    raise GongjiError(
+                        f"{candidate['region']} 有可用 GPU，但备用镜像或同区域模型存储尚未配置"
+                    )
+                return candidate, mark
+
+    raise NoGpuAvailableError("暂时无GPU，稍后重试")
 
 
 def _output_upload_targets(
@@ -262,13 +379,23 @@ async def create_job(
     start_script: dict[str, Any] | None = None,
     extra_env: list[dict[str, str]] | None = None,
     workload: str = "video",
+    selected_profile: dict[str, Any] | None = None,
+    selected_mark: dict[str, Any] | None = None,
 ) -> int:
     """创建一个生成任务，返回共绩的 task_id。"""
-    profile = _profile(quality, workload)
+    profile = selected_profile or _profile(quality, workload)
     if not TOKEN or not profile["image"] or not profile["storage_id"]:
         raise GongjiError(f"共绩 {quality} Job 配置不完整")
 
-    mark = await _resource(profile)
+    if selected_mark is not None:
+        mark = selected_mark
+    elif service_image is None and task_prefix in {"h3", "h3-commerce"}:
+        # Standard video and commerce remix jobs use a live inventory check
+        # and an optional per-tier backup. Dedicated worker images (music,
+        # digital human, Qwen analysis, long video, etc.) keep their own path.
+        profile, mark = await _select_available_profile(profile, quality, workload)
+    else:
+        mark = await _resource(profile)
     env = [
         {"name": "H3_MODELS_DIR", "value": MODELS_DIR},
         {"name": "H3_ENABLE_SERVERLESS_HANDLER", "value": "0"},
@@ -278,7 +405,13 @@ async def create_job(
         {"name": "H3_JOB_INPUT", "value": json.dumps(
             _direct_local_media_urls(worker_input, transfer_backend), ensure_ascii=False,
         )},
-        {"name": "H3_USE_SAGE_ATTENTION", "value": "1"},
+        # Keep the existing optimized 4090 path. Blackwell currently falls
+        # back to ComfyUI attention to avoid the 4090 SageAttention PTX kernel.
+        {"name": "H3_USE_SAGE_ATTENTION", "value": (
+            os.getenv("H3_5090_USE_SAGE_ATTENTION", "0").strip()
+            if str(profile["gpu"]).startswith("5090")
+            else os.getenv("H3_USE_SAGE_ATTENTION", "1").strip()
+        )},
         # Matches the standalone GPU server's default Sol-Attn graph patch.
         # Set to "off" for an A/B run without rebuilding the worker image.
         {"name": "H3_SOLATTN", "value": profile["solattn"]},
@@ -367,6 +500,7 @@ async def create_job(
         start_script is None
         and transfer_backend == "local"
         and worker_input.get("mode") != "digital_human_workflow"
+        and not _image_has_baked_standard_runtime(service_image or profile["image"])
     ):
         overlay_key = os.getenv("GONGJI_STANDARD_OVERLAY_KEY", "h3-long-worker.tar.gz").strip()
         if overlay_key and os.path.isfile(os.getenv("H3_LOCAL_RUNTIME_OVERLAY_PATH", "")):
@@ -536,7 +670,48 @@ async def create_music_job(
         service_image=image, task_prefix="h3-music",
         timeout_sec=int(os.getenv("GONGJI_MUSIC_TIMEOUT_SEC", "3600")),
         estimated_sec=int(os.getenv("GONGJI_MUSIC_ESTIMATED_SEC", "900")),
+        # This image has its own YuE2 runner. Letting create_job install the
+        # standard video overlay replaces its ENTRYPOINT with /app/entrypoint.sh
+        # and sends the music payload to the video API, which rejects its mode.
+        start_script={"command": ["python3"], "args": ["/app/worker.py"]},
         workload="video",
+    )
+
+
+def voice_clone_configured() -> bool:
+    return bool(
+        os.getenv("GONGJI_VOICE_CLONE_IMAGE", "").strip()
+        and os.getenv("GONGJI_VOICE_CLONE_STORAGE_ID", "").strip()
+    )
+
+
+async def create_voice_clone_job(
+    job_id: str,
+    merchant_id: str,
+    worker_input: dict[str, Any],
+) -> int:
+    """Submit the isolated IndexTTS-2 worker without touching H3 video images."""
+    if not voice_clone_configured():
+        raise GongjiError("声音克隆 Worker 镜像或模型盘尚未配置")
+    profile = _profile("720p")
+    profile.update({
+        "image": os.environ["GONGJI_VOICE_CLONE_IMAGE"].strip(),
+        "storage_id": int(os.environ["GONGJI_VOICE_CLONE_STORAGE_ID"]),
+        "region": os.getenv("GONGJI_VOICE_CLONE_REGION_NAME", "浙江四区"),
+        "gpu": os.getenv("GONGJI_VOICE_CLONE_GPU_NAME", "4090"),
+        "gpu_count": 1,
+    })
+    profile, mark = await _select_available_profile(
+        profile, "720p", "video", backup_prefix="GONGJI_VOICE_CLONE_BACKUP",
+    )
+    return await create_job(
+        job_id, merchant_id, worker_input, "720p", "local",
+        service_image=profile["image"], task_prefix="voice-clone",
+        timeout_sec=int(os.getenv("GONGJI_VOICE_CLONE_TIMEOUT_SEC", "3600")),
+        estimated_sec=int(os.getenv("GONGJI_VOICE_CLONE_ESTIMATED_SEC", "300")),
+        start_script={"command": ["/opt/index-tts/.venv/bin/python"],
+                      "args": ["/app/worker.py"]},
+        selected_profile=profile, selected_mark=mark,
     )
 
 
@@ -561,6 +736,13 @@ async def create_long_job(
         image = os.getenv("GONGJI_DIGITAL_HUMAN_IMAGE", "").strip()
         if not image:
             raise GongjiError("数字人共绩镜像尚未配置（GONGJI_DIGITAL_HUMAN_IMAGE）")
+        profile = _profile("720p")
+        profile["image"] = image
+        profile, mark = await _select_available_profile(
+            profile, "720p", "video",
+            backup_prefix="GONGJI_DIGITAL_HUMAN_BACKUP",
+        )
+        image = profile["image"]
     else:
         image = os.getenv("GONGJI_LONG_IMAGE", "").strip()
         if not image:
@@ -613,6 +795,8 @@ async def create_long_job(
         estimated_sec=estimated,
         start_script=start_script,
         extra_env=extra_env,
+        selected_profile=profile if is_digital_human else None,
+        selected_mark=mark if is_digital_human else None,
     )
 
 

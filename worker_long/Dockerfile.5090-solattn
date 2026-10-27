@@ -1,0 +1,55 @@
+# RTX 5090 sibling image with the official Comfy Kitchen Sol-Attn CUDA
+# extension. The existing 0.2.31 Python overlay exposes the chunked Sol-Attn
+# wrapper, but its bundled CUDA extension lacks sol_attn_plan and friends.
+# Keep the local wrapper/overlay intact, replace its CUDA extension with the
+# pinned 0.2.32 abi3 build. That is the first official release containing
+# Sol-Attn and sm_120 while retaining the existing overlay's operator ABI.
+ARG BASE_IMAGE=harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-2k-ref1-6step-denoise02-baked-runtime-20261014-v9
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+
+USER root
+
+RUN /opt/venv/bin/python - <<'PYCODE'
+from hashlib import sha256
+from pathlib import Path
+from urllib.request import urlopen
+from zipfile import ZipFile
+
+url = (
+    "https://files.pythonhosted.org/packages/80/f9/"
+    "83cd0892c30bde91665b267ce8ce5b9f43cf48185cac579abd9d5c831827/"
+    "comfy_kitchen-0.2.32-cp312-abi3-manylinux_2_27_x86_64."
+    "manylinux_2_28_x86_64.whl"
+)
+expected_sha256 = "e60d87e2f63703dccf8ce76ce0b9118042306388b39a9605c0748e56c0bb85d4"
+wheel = urlopen(url, timeout=120).read()
+actual_sha256 = sha256(wheel).hexdigest()
+if actual_sha256 != expected_sha256:
+    raise SystemExit(f"comfy-kitchen wheel checksum mismatch: {actual_sha256}")
+
+with ZipFile(__import__("io").BytesIO(wheel)) as archive:
+    extension = archive.read("comfy_kitchen/backends/cuda/_C.abi3.so")
+
+required = (b"sol_attn_plan", b"sol_producer_begin", b"sol_producer_chunk", b"sol_attn_core", b"sm_120")
+missing = [symbol.decode() for symbol in required if symbol not in extension]
+if missing:
+    raise SystemExit(f"official extension is missing required symbols: {missing}")
+
+targets = (
+    Path("/opt/vsa-overlay/comfy_kitchen/backends/cuda/_C.abi3.so"),
+    Path("/opt/venv/lib/python3.13/site-packages/comfy_kitchen/backends/cuda/_C.abi3.so"),
+)
+for target in targets:
+    if not target.is_file():
+        raise SystemExit(f"expected comfy-kitchen extension not found: {target}")
+    target.write_bytes(extension)
+    print(f"installed official 0.2.32 CUDA extension ({len(extension)} bytes): {target}")
+
+PYCODE
+
+LABEL org.opencontainers.image.title="Equai H3 2K worker for RTX 5090 with Sol-Attn" \
+      org.opencontainers.image.description="5090 worker with official Comfy Kitchen 0.2.32 CUDA Sol-Attn kernels and sm_120 support, ABI-matched to the existing overlay" \
+      org.equai.gpu.target="5090" \
+      org.equai.sol-attn="comfy-kitchen-0.2.32-cuda-sm120" \
+      org.equai.base.image="${BASE_IMAGE}"

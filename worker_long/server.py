@@ -1,5 +1,6 @@
 """MiniMax H3 worker service with the API-only long-video route."""
 
+import copy
 import math
 import os
 import uuid
@@ -666,7 +667,48 @@ def latent_refine_workflow(prompt: str, video_latent: str, audio_latent: str,
     return graph
 
 
+def _configure_attention_graph(graph: dict) -> dict:
+    """Remove fused SageAttention patches on the isolated Blackwell path.
+
+    The 4090 image keeps the original graph when H3_USE_SAGE_ATTENTION=1.
+    A 5090 sibling sets it to 0; links to removed patch nodes are redirected
+    to the patch's original model input so the rest of the workflow is intact.
+    """
+    if os.getenv("H3_USE_SAGE_ATTENTION", "1").strip().lower() not in {"0", "false", "off", "no"}:
+        return graph
+
+    configured = copy.deepcopy(graph)
+    replacements = {
+        node_id: node.get("inputs", {}).get("model")
+        for node_id, node in configured.items()
+        if isinstance(node, dict)
+        and "SageAttentionPatch" in str(node.get("class_type", ""))
+        and isinstance(node.get("inputs", {}).get("model"), list)
+    }
+
+    def resolve(link):
+        visited = set()
+        while isinstance(link, list) and len(link) == 2 and link[0] in replacements:
+            node_id = link[0]
+            if node_id in visited:
+                break
+            visited.add(node_id)
+            link = replacements[node_id]
+        return link
+
+    for node_id in replacements:
+        configured.pop(node_id, None)
+    for node in configured.values():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for name, value in inputs.items():
+            inputs[name] = resolve(value)
+    return configured
+
+
 async def submit(graph: dict) -> dict:
+    graph = _configure_attention_graph(graph)
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(f"{COMFY}/prompt", json={"prompt": graph})
     if response.status_code >= 400:

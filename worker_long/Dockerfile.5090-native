@@ -1,0 +1,83 @@
+# Blackwell (RTX 5090) sibling of the validated 2K worker, with every
+# accelerated kernel kept.
+#
+# The 4090 image already ships everything Blackwell needs:
+#
+#   torch 2.13.0+cu130      built for sm_75 80 86 90 100 120
+#   SageAttention           _qattn_sm89.so contains sm_120 and compute_120
+#   comfy_kitchen 0.2.31    site-packages/.../_C.abi3.so (176 MB) contains
+#                           sm_80 sm_89 sm_90 sm_100 sm_120
+#
+# What breaks on a 5090 is a single shadowing problem. PYTHONPATH puts
+# /opt/vsa-overlay ahead of site-packages, and that overlay carries its own
+# comfy_kitchen CUDA extension built for sm_89 only (36.8 MB, one fifth the
+# size). Every kernel call therefore lands on an Ada-only binary, the driver is
+# asked to JIT sm_89 PTX onto Blackwell, and it refuses.
+#
+# So this image copies the official multi-architecture extension over the
+# overlay's Ada-only one and changes nothing else. No kernel is disabled, no
+# attention backend is downgraded, no dequantizer is pushed onto an eager path:
+# the 5090 runs the same accelerated code the 4090 runs, from the same build.
+#
+# The overlay's own __init__.py is left in place. It differs from the published
+# one and may carry local behaviour, and both files come from comfy_kitchen
+# 0.2.31, so the extension ABI matches.
+ARG BASE_IMAGE=harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-2k-ref1-6step-denoise02-baked-runtime-20261007-v1
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+
+USER root
+
+RUN python - <<'PYCODE'
+from pathlib import Path
+
+OVERLAY = Path("/opt/vsa-overlay/comfy_kitchen/backends/cuda/_C.abi3.so")
+OFFICIAL = Path("/opt/venv/lib/python3.13/site-packages/comfy_kitchen/backends/cuda/_C.abi3.so")
+
+# Refuse to build against anything but the layout this fix was verified on, so
+# a future base image cannot silently inherit a patch that no longer applies.
+if not OVERLAY.is_file() or not OFFICIAL.is_file():
+    raise SystemExit("comfy_kitchen CUDA extension not found where expected; refusing unsafe image build")
+
+overlay_arch = {a for a in (b"sm_80", b"sm_89", b"sm_90", b"sm_100", b"sm_120")
+                if a in OVERLAY.read_bytes()}
+official_arch = {a for a in (b"sm_80", b"sm_89", b"sm_90", b"sm_100", b"sm_120")
+                 if a in OFFICIAL.read_bytes()}
+if b"sm_120" not in official_arch:
+    raise SystemExit(f"site-packages extension has no sm_120 kernels ({official_arch}); refusing unsafe image build")
+if b"sm_120" in overlay_arch:
+    print("overlay extension already covers sm_120; nothing to replace")
+else:
+    OVERLAY.write_bytes(OFFICIAL.read_bytes())
+    print(f"replaced overlay extension {sorted(overlay_arch)} -> {sorted(official_arch)}")
+
+# Batch-job containers can replace the image PATH, after which the upstream
+# entrypoint resolves the system python instead of the baked virtualenv and the
+# runtime dependencies are missing. Prefer the venv explicitly.
+entrypoint = Path("/app/entrypoint.sh")
+script = entrypoint.read_text()
+needle = "set -euo pipefail\n"
+addition = """set -euo pipefail
+
+# Batch-job containers can replace the image PATH. Prefer the baked runtime
+# venv explicitly so both Python imports and the uvicorn CLI resolve.
+if [[ -x /opt/venv/bin/python ]]; then
+  export PATH="/opt/venv/bin:$PATH"
+fi
+"""
+if addition in script:
+    pass
+elif script.count(needle) == 1:
+    entrypoint.write_text(script.replace(needle, addition, 1))
+else:
+    raise SystemExit("unexpected entrypoint header; refusing unsafe image build")
+PYCODE
+
+COPY worker_long/baked_runtime/app/server.py /app/server.py
+
+ENV H3_GPU_TARGET=5090
+
+LABEL org.opencontainers.image.title="Equai H3 2K worker for RTX 5090" \
+      org.opencontainers.image.description="Blackwell sibling of the 4090 2K worker; keeps every accelerated kernel by using the multi-architecture comfy_kitchen extension already present in the base image" \
+      org.equai.gpu.target="5090" \
+      org.equai.base.image="${BASE_IMAGE}"

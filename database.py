@@ -201,6 +201,15 @@ def init_db() -> None:
             VALUES
               (1,0,'https://api.deepseek.com','','',0);
 
+            CREATE TABLE IF NOT EXISTS prompt_service_overrides (
+              merchant_id TEXT PRIMARY KEY REFERENCES merchants(id),
+              base_url TEXT NOT NULL,
+              model TEXT NOT NULL,
+              api_key_ciphertext TEXT NOT NULL,
+              key_hint TEXT NOT NULL,
+              updated_at REAL NOT NULL
+            );
+
             -- Hypit-style durable editing projects.  Existing video tasks remain
             -- the execution primitive; these tables retain the editable project
             -- boundary, its analysis/timeline, and each reproducible Run.

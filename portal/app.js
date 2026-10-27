@@ -203,25 +203,16 @@ function mobileContentType(field, file) {
 async function putDirectAsset(grant, file, onProgress) {
   const chunkBytes = Number(grant.chunk_bytes || 0);
   const parallelism = Math.max(1, Math.min(6, Number(grant.parallelism || 1)));
-  async function retryUpload(url, body, progress, fallbackUrl = "") {
+  async function retryUpload(url, body, progress) {
     let last;
     for (let attempt = 0; attempt < 3; attempt++) {
       try { return await putDirectChunk(url, body, grant.content_type, progress); }
       catch (error) { last = error; if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 700 * 2 ** attempt)); }
     }
-    // If the direct Tencent origin is unreachable from a particular mobile
-    // carrier, transparently retry the same signed chunk through the public
-    // origin instead of making the user choose a different upload mode.
-    if (fallbackUrl && fallbackUrl !== url) {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try { return await putDirectChunk(fallbackUrl, body, grant.content_type, progress); }
-        catch (error) { last = error; if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 700)); }
-      }
-    }
     throw last;
   }
   if (!chunkBytes || file.size <= chunkBytes) {
-    return retryUpload(grant.upload_url, file, onProgress, grant.fallback_upload_url || "");
+    return retryUpload(grant.upload_url, file, onProgress);
   }
   const count = Math.ceil(file.size / chunkBytes), loaded = new Array(count).fill(0);
   let cursor = 0;
@@ -231,13 +222,10 @@ async function putDirectAsset(grant, file, onProgress) {
       const start = index * chunkBytes, end = Math.min(file.size, start + chunkBytes);
       const separator = grant.upload_url.includes("?") ? "&" : "?";
       const url = `${grant.upload_url}${separator}part=${index}&parts=${count}`;
-      const fallbackBase = grant.fallback_upload_url || "";
-      const fallbackSeparator = fallbackBase.includes("?") ? "&" : "?";
-      const fallbackUrl = fallbackBase ? `${fallbackBase}${fallbackSeparator}part=${index}&parts=${count}` : "";
       await retryUpload(url, file.slice(start, end, grant.content_type), value => {
         loaded[index] = value;
         onProgress(loaded.reduce((sum, size) => sum + size, 0));
-      }, fallbackUrl);
+      });
       loaded[index] = end - start;
       onProgress(loaded.reduce((sum, size) => sum + size, 0));
     }
@@ -262,9 +250,18 @@ async function prepareStudioDirectUpload(form, onProgress = () => {}) {
       })),
     }),
   });
-  if (granted.enabled === false) return form;
+  if (granted.enabled === false) {
+    throw new Error("腾讯云直传暂不可用，请稍后重试；为避免改走中转上传，本次没有发送素材");
+  }
   if (!Array.isArray(granted.items) || granted.items.length !== files.length) {
     throw new Error("素材上传授权数量不正确");
+  }
+  for (const grant of granted.items) {
+    let target;
+    try { target = new URL(grant.upload_url); } catch { throw new Error("腾讯云上传地址无效，本次没有发送素材"); }
+    if (target.protocol !== "https:" || target.hostname !== "129.204.50.9") {
+      throw new Error("素材上传地址未指向腾讯云服务器，本次没有发送素材");
+    }
   }
   const loaded = new Array(files.length).fill(0);
   const total = files.reduce((sum, item) => sum + item.file.size, 0);
@@ -280,7 +277,7 @@ async function prepareStudioDirectUpload(form, onProgress = () => {}) {
       onProgress(Math.min(100, Math.round(loaded.reduce((sum, n) => sum + n, 0) / total * 100)));
     }
   }
-  await Promise.all(Array.from({length:Math.min(3, files.length)}, worker));
+  await Promise.all(Array.from({length:Math.min(6, files.length)}, worker));
   const directForm = new FormData();
   for (const [key, value] of form.entries()) {
     if (!(value instanceof File)) directForm.append(key, value);
@@ -357,7 +354,7 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape") $("#communityModal").classList.add("hidden");
 });
 
-const APP_PAGES = new Set(["studio", "commerce-remix", "digital-human", "editor", "image-edit"]);
+const APP_PAGES = new Set(["studio", "commerce-remix", "digital-human", "editor", "image-edit", "voice-clone"]);
 
 function switchApiTab(name) {
   if (name !== "keys" && name !== "docs") return;
@@ -391,6 +388,14 @@ function setOverviewRecord(name, persist = true) {
 setOverviewRecord(activeOverviewRecord, false);
 
 function switchPage(name) {
+  if (name === "voice-clone" && !window.__equaiVoiceCloneAvailable) {
+    toast("声音克隆暂不开放");
+    name = "apps";
+  }
+  if (name === "editor") {
+    toast("视频编辑暂不开放，恢复后再试");
+    name = "apps";
+  }
   if (name === "remix" || name === "remix2") name = "apps";
   if (name === "calls" || name === "ledger") name = "overview";
   if (name === "keys") { activeApiTab = "keys"; name = "api"; }
@@ -422,6 +427,7 @@ function applyAppDirectoryFilter() {
   const favorites = readAppFavorites();
   let visible = 0;
   $$("#appLaunchGrid .app-launch-card").forEach(card => {
+    if (card.classList.contains("hidden")) return;
     const matchesCategory = appCategory === "全部" || card.dataset.appCategory === appCategory;
     const matchesFavorites = !showAppFavorites || favorites.has(card.dataset.appId);
     const shown = matchesCategory && matchesFavorites;

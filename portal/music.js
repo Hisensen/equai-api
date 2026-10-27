@@ -99,14 +99,16 @@
     const button = formElement.querySelector('[type="submit"]');
     if (!file) { error.textContent = "请选择音频文件"; return; }
     const body = new FormData();
-    body.append("source", file);
+    body.append("kind", "reference");
+    body.append("audios", file, file.name);
     body.append("style", $("#musicStyle").value);
     body.append("voice", $("#musicVoice").value);
     body.append("prompt", $("#musicPrompt").value);
     body.append("lyrics", $("#musicLyrics").value);
     body.append("title", file.name);
     button.disabled = true; error.textContent = "";
-    uploadForm("/api/account/music", body, {"Idempotency-Key": crypto.randomUUID()})
+    prepareStudioDirectUpload(body)
+      .then(staged => uploadForm("/api/account/music", staged, {"Idempotency-Key": crypto.randomUUID()}))
       .then(() => { toast("音乐任务已创建"); formElement.reset(); refreshTasks(); })
       .catch(err => { error.textContent = err.message; })
       .finally(() => { button.disabled = false; });

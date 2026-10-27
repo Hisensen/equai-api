@@ -1,7 +1,7 @@
 services:
   api:
     build: .
-    image: equai-api:digital-human-baked-20261006-v2
+    image: equai-api:highres-baked-runtime-20261007-v1
     container_name: equai-api
     restart: unless-stopped
     env_file:
@@ -12,10 +12,9 @@ services:
       H3_IMAGE_EDIT_PRICE_MILLI: "200"
       # Video remix adds 0.5 pt to the selected standard video tier.
       H3_REMIX_SURCHARGE_MILLI: "500"
-      # New jobs upload directly to private object storage. Existing local
-      # artifacts remain readable through their stored per-task metadata.
-      H3_WORKER_TRANSFER_BACKEND: cos
-      H3_LOCAL_OUTPUTS: "0"
+      # Keep the deployed Tencent local transfer path on future restarts.
+      H3_WORKER_TRANSFER_BACKEND: local
+      H3_LOCAL_OUTPUTS: "1"
       H3_LOCAL_INPUT_DIR: /data/inputs
       H3_LOCAL_RESULT_DIR: /data/job-results
       # Direct origin used only inside signed GPU job parameters; never returned to merchants.
@@ -23,14 +22,14 @@ services:
       H3_TRANSFER_HOSTNAME: transfer.172-98-23-30.sslip.io
       H3_TRANSFER_HOST_IP: 172.98.23.30
       H3_TRANSFER_MAX_GRANT_SECONDS: "93600"
-      # Browser media goes to the authenticated Guangzhou relay, then into COS.
+      # Browser media goes to the authenticated Guangzhou upload endpoint.
       H3_DIRECT_UPLOADS: "1"
-      H3_UPLOAD_RELAY_BASE_URL: https://129.204.50.9
+      H3_UPLOAD_RELAY_BASE_URL: ""
       COS_CDN_DOMAIN: ${COS_CDN_DOMAIN:-}
       # All production video modes temporarily use the Zhejiang Four 4090-48G
       # pool; the 24G Fujian Four pool is disabled until further notice.
       # Experimental RTX 5090 workers are submitted only by isolated test scripts.
-      GONGJI_720_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-720-ref1-6step-io
+      GONGJI_720_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-720-ref1-6step-baked-runtime-overlay-20261007-v2
       GONGJI_720_STORAGE_ID: "2593"
       GONGJI_720_REGION_NAME: 浙江四区
       GONGJI_720_GPU_NAME: 4090-48G
@@ -49,10 +48,22 @@ services:
       GONGJI_REMIX_1080_STORAGE_ID: "2593"
       GONGJI_REMIX_1080_GPU_NAME: 4090-48G
       GONGJI_REMIX_1080_GPU_COUNT: "1"
+      GONGJI_REMIX_1080_BACKUP_REGION_NAME: 天津一区
+      GONGJI_REMIX_1080_BACKUP_STORAGE_ID: "2593"
+      GONGJI_REMIX_1080_BACKUP_GPU_NAME: "5090"
+      GONGJI_REMIX_1080_BACKUP_GPU_COUNT: "1"
+      GONGJI_REMIX_1080_BACKUP_CPU_CORES: "16"
+      GONGJI_REMIX_1080_BACKUP_IMAGE: harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-2k-ref1-6step-denoise02-baked-runtime-20261014-v12
       GONGJI_REMIX_2K_REGION_NAME: 浙江四区
       GONGJI_REMIX_2K_STORAGE_ID: "2593"
       GONGJI_REMIX_2K_GPU_NAME: 4090-48G
       GONGJI_REMIX_2K_GPU_COUNT: "1"
+      GONGJI_REMIX_2K_BACKUP_REGION_NAME: 天津一区
+      GONGJI_REMIX_2K_BACKUP_STORAGE_ID: "2593"
+      GONGJI_REMIX_2K_BACKUP_GPU_NAME: "5090"
+      GONGJI_REMIX_2K_BACKUP_GPU_COUNT: "1"
+      GONGJI_REMIX_2K_BACKUP_CPU_CORES: "16"
+      GONGJI_REMIX_2K_BACKUP_IMAGE: harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-2k-ref1-6step-denoise02-baked-runtime-20261014-v12
       H3_REMIX_MAX_CONCURRENCY: "4"
       H3_REMIX_DISPATCH_PARALLELISM: "2"
       # Portal remix: hypit edit path, reference read by qwen3-vl-plus (remix_vision). legacy = old Qwen+keyframes.
@@ -73,20 +84,34 @@ services:
       GONGJI_LONG_ESTIMATED_SEC: "1800"
       H3_LONG_MAX_DURATION_SECONDS: "60"
       H3_LONG_PRICE_PER_SEGMENT_MILLI: "1000"
-      GONGJI_1080_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-1080-ref1-6step-io
+      # Standard 720p, 1080p and 2K runtime code and custom nodes are baked
+      # into their images; gongji.py skips Tencent runtime downloads for these tags.
+      GONGJI_1080_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-1080-ref1-6step-baked-runtime-20261007-v1
       GONGJI_1080_STORAGE_ID: "2593"
       GONGJI_1080_REGION_NAME: 浙江四区
       GONGJI_1080_GPU_NAME: 4090-48G
       GONGJI_1080_GPU_COUNT: "1"
+      GONGJI_1080_BACKUP_REGION_NAME: 天津一区
+      GONGJI_1080_BACKUP_STORAGE_ID: "2593"
+      GONGJI_1080_BACKUP_GPU_NAME: "5090"
+      GONGJI_1080_BACKUP_GPU_COUNT: "1"
+      GONGJI_1080_BACKUP_CPU_CORES: "16"
+      GONGJI_1080_BACKUP_IMAGE: harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-2k-ref1-6step-denoise02-baked-runtime-20261014-v12
       GONGJI_1080_COMFY_ARGS: "--use-ck-attention --reserve-vram 1 --fast-disk"
       GONGJI_1080_SOLATTN: tau:1.3:0.0:1.0
       GONGJI_1080_ESTIMATED_SEC: "720"
       GONGJI_1080_TIMEOUT_SEC: "2400"
-      GONGJI_2K_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-2k-ref1-6step-denoise02-io
+      GONGJI_2K_IMAGE: harbor.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-4090-2k-ref1-6step-denoise02-baked-runtime-20261007-v1
       GONGJI_2K_STORAGE_ID: "2593"
       GONGJI_2K_REGION_NAME: 浙江四区
       GONGJI_2K_GPU_NAME: 4090-48G
       GONGJI_2K_GPU_COUNT: "1"
+      GONGJI_2K_BACKUP_REGION_NAME: 天津一区
+      GONGJI_2K_BACKUP_STORAGE_ID: "2593"
+      GONGJI_2K_BACKUP_GPU_NAME: "5090"
+      GONGJI_2K_BACKUP_GPU_COUNT: "1"
+      GONGJI_2K_BACKUP_CPU_CORES: "16"
+      GONGJI_2K_BACKUP_IMAGE: harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-2k-ref1-6step-denoise02-baked-runtime-20261014-v12
       GONGJI_2K_COMFY_ARGS: "--use-ck-attention --reserve-vram 1 --fast-disk"
       GONGJI_2K_SOLATTN: tau:1.3:0.0:1.0
       GONGJI_2K_ESTIMATED_SEC: "960"

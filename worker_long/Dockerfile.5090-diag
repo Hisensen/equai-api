@@ -1,0 +1,92 @@
+# Diagnostic sibling of the 5090 image. Identical runtime, plus one thing: when
+# the worker fails, it ships its own logs back instead of leaving them only in
+# the provider's container output, which our API token cannot read.
+#
+# The logs go through the upload endpoint that already exists on the Guangzhou
+# host, with a signed, size-locked, expiring grant passed in as
+# H3_DIAG_UPLOAD_URL. Nothing new is exposed: no new port, no new nginx route,
+# no unauthenticated write path. A job without that variable behaves exactly
+# like the production image.
+#
+# Build this only to diagnose a failure; the production tag stays on
+# Dockerfile.5090-native.
+ARG BASE_IMAGE=harborpush.suanleme.cn/h3platform/h3-video-worker:standard-v9-r50-5090-2k-ref1-6step-denoise02-baked-runtime-20261014-v8
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+
+USER root
+
+RUN python - <<'PYCODE'
+from pathlib import Path
+
+entrypoint = Path("/app/entrypoint.sh")
+script = entrypoint.read_text()
+
+# The endpoint validates Content-Length against the size the grant was signed
+# for, so the payload is padded to exactly that many bytes.
+helper = '''
+h3_ship_diag() {
+  [[ -n "${H3_DIAG_UPLOAD_URL:-}" ]] || return 0
+  local size="${H3_DIAG_SIZE:-262144}"
+  {
+    echo "### reason: $1"
+    echo "### H3_COMFY_ARGS=${H3_COMFY_ARGS:-}"
+    echo "### H3_USE_SAGE_ATTENTION=${H3_USE_SAGE_ATTENTION:-}"
+    echo "### nvidia-smi"
+    nvidia-smi 2>&1 | head -20
+    echo "### torch"
+    /opt/venv/bin/python -c "import torch;print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no-cuda', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else '')" 2>&1 | head -5
+    echo "### job_runner"
+    tail -c 60000 /app/logs/job-runner.log 2>/dev/null
+    echo "### comfyui.log"
+    tail -c 90000 /app/logs/comfyui.log 2>/dev/null
+    echo "### internal-api.log"
+    tail -c 40000 /app/logs/internal-api.log 2>/dev/null
+  } > /tmp/h3diag.raw 2>&1
+  /opt/venv/bin/python - "$size" <<'PAD' || return 0
+import sys
+n = int(sys.argv[1])
+d = open("/tmp/h3diag.raw", "rb").read()[:n]
+open("/tmp/h3diag.bin", "wb").write(d + b" " * (n - len(d)))
+PAD
+  curl -sS -X PUT -H "Content-Type: text/plain" \\
+       --data-binary @/tmp/h3diag.bin "$H3_DIAG_UPLOAD_URL" >/dev/null 2>&1 || true
+}
+'''
+
+needle = 'comfy_args="${H3_COMFY_ARGS:---reserve-vram 1}"\n'
+if needle not in script:
+    raise SystemExit("unexpected entrypoint; refusing to build the diagnostic image")
+script = script.replace(needle, helper + "\n" + needle, 1)
+
+# Capture job_runner's own output, and ship the logs however it ends.
+old_job = '''      echo "H3 job mode: running a single task"
+      python job_runner.py
+      exit $?
+'''
+new_job = '''      echo "H3 job mode: running a single task"
+      python job_runner.py > >(tee -a /app/logs/job-runner.log) 2>&1
+      rc=$?
+      [[ $rc -ne 0 ]] && h3_ship_diag "job_runner exit $rc"
+      exit $rc
+'''
+if script.count(old_job) != 1:
+    raise SystemExit("unexpected job-mode block; refusing to build the diagnostic image")
+script = script.replace(old_job, new_job, 1)
+
+old_ready = '''echo "H3 internal services failed to become ready" >&2
+'''
+new_ready = '''echo "H3 internal services failed to become ready" >&2
+h3_ship_diag "services not ready within timeout"
+'''
+if script.count(old_ready) != 1:
+    raise SystemExit("unexpected readiness-failure block; refusing to build the diagnostic image")
+script = script.replace(old_ready, new_ready, 1)
+
+entrypoint.write_text(script)
+print("diagnostic log shipping installed")
+PYCODE
+
+LABEL org.opencontainers.image.title="Equai H3 2K worker for RTX 5090 (diagnostic)" \
+      org.equai.gpu.target="5090" \
+      org.equai.diagnostic="ships worker logs to a signed upload grant on failure"

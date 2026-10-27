@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import gongji
 import music_api
+import scheduler
+import main
 from main import app
 
 _worker_spec = importlib.util.spec_from_file_location(
@@ -149,6 +151,7 @@ def test_music_creation_accepts_the_production_merchant_record_shape(monkeypatch
     result = asyncio.run(music_api.create_music(
         merchant={"id": "merchant-internal", "status": "active"},
         source=UploadFile(BytesIO(b"RIFF" + b"0" * 12), filename="test.wav"),
+        direct_assets="",
         style="纯器乐", voice="无人声", prompt="", lyrics="", title="test",
     ))
 
@@ -170,6 +173,31 @@ def test_music_task_view_exposes_authenticated_mp3_preview_only(monkeypatch) -> 
     assert [artifact["name"] for artifact in view["artifacts"]] == ["song.mp3"]
     assert view["artifacts"][0]["preview_url"] == "/api/account/music/tasks/mus_test/preview"
     assert view["artifacts"][0]["download_url"] == "/api/account/music/tasks/mus_test/download"
+
+
+def test_api_lifespan_starts_a_dedicated_music_status_poller(monkeypatch) -> None:
+    calls = []
+
+    async def wait_forever(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    async def poll_loop(*, music_only=False):
+        calls.append(music_only)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "init_db", lambda: None)
+    monkeypatch.setattr(scheduler, "recover_interrupted_claims", lambda: None)
+    monkeypatch.setattr(scheduler, "dispatch_loop", wait_forever)
+    monkeypatch.setattr(scheduler, "poll_loop", poll_loop)
+    monkeypatch.setattr(scheduler, "cleanup_loop", wait_forever)
+    monkeypatch.setattr(scheduler, "backup_loop", wait_forever)
+
+    async def run():
+        async with main.lifespan(app):
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    assert calls == [False, True]
 
 
 def test_music_preview_streams_inline_mp3_for_the_owning_merchant(tmp_path, monkeypatch) -> None:

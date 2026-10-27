@@ -51,14 +51,12 @@ from local_storage import signed_url as signed_local_url
 from local_storage import verify as verify_local_url
 from object_storage import (
     bucket_name,
-    create_upload_grant,
     delete_keys,
     download_path,
     object_metadata,
     presigned_url,
     read_prefix,
     upload_fileobj,
-    upload_relay,
     verify_upload_grant,
 )
 from security import api_merchant, portal_merchant, video_merchant
@@ -99,7 +97,7 @@ log = logging.getLogger("h3.video")
 # bytes are already on this host and shrinking only makes the upload smaller.
 INPUT_RETENTION = int(os.getenv("H3_INPUT_RETENTION_SECONDS", "86400"))
 OUTPUT_RETENTION = int(os.getenv("H3_OUTPUT_RETENTION_SECONDS", "172800"))
-ALLOWED_KINDS = {"text", "image", "reference"}
+ALLOWED_KINDS = {"text", "image", "reference", "image-edit"}
 ALLOWED_DURATION = set(range(5, 16))
 MAX_INPUT_BYTES = 512 * 1024 * 1024
 
@@ -153,10 +151,17 @@ def _task_view(
         visible.append(public)
     started = value["started_at"]
     finished = value["finished_at"]
+    task_tool = payload.get("_tool", "video")
+    # Commerce depth tasks are handed off to the generic H3 remix worker after
+    # Tencent-side preflight. Keep their product identity for the portal so
+    # they remain visible in the commerce-remix history after dispatch.
+    if (task_tool == "remix"
+            and (payload.get("_remix") or {}).get("commerce_depth_worker")):
+        task_tool = "commerce_remix"
     result = {
         "id": value["id"],
         "kind": value["kind"],
-        "tool": payload.get("_tool", "video"),
+        "tool": task_tool,
         "quality": value["quality"],
         "duration": value["duration"],
         "ratio": value["ratio"],
@@ -285,6 +290,9 @@ def _canonical_content_type(field: str, filename: str, content_type: str | None)
 def _validate_media_fields(kind: str, fields: list[str]) -> None:
     if kind == "text" and fields:
         raise HTTPException(422, "文生视频不接受上传素材")
+    if kind == "image-edit":
+        if len(fields) > 10 or any(field != "images" for field in fields):
+            raise HTTPException(422, "图片编辑最多上传 10 张参考图")
     if kind == "image":
         if fields.count("first_frame") != 1:
             raise HTTPException(422, "首尾帧模式必须上传一个 first_frame")
@@ -336,10 +344,10 @@ def presign_portal_uploads(
     account: Annotated[dict, Depends(portal_merchant)],
 ) -> dict:
     if os.getenv("H3_DIRECT_UPLOADS", "0").strip() != "1":
-        return {"enabled": False, "items": []}
+        raise HTTPException(503, "腾讯云直传暂不可用，请稍后重试")
     kind = request.kind.strip().lower()
     if kind not in ALLOWED_KINDS:
-        raise HTTPException(422, "kind 必须是 text、image 或 reference")
+        raise HTTPException(422, "kind 必须是 text、image、reference 或 image-edit")
     fields = [item.field for item in request.files]
     _validate_media_fields(kind, fields)
     expected = _expected_media()
@@ -348,38 +356,24 @@ def presign_portal_uploads(
         raise HTTPException(413, "单次请求全部素材合计不能超过 512MB")
     if account["status"] != "active":
         raise HTTPException(403, "账户未启用或已暂停")
-    if transfer_backend() == "local" and os.getenv("H3_LOCAL_DIRECT_UPLOADS", "0").strip() == "1":
-        grants = []
-        for item in request.files:
-            content_type = _canonical_content_type(item.field, item.filename, item.content_type)
-            if not content_type.startswith(expected[item.field] + "/"):
-                raise HTTPException(422, f"{item.field} 的文件类型不正确")
-            grants.append(create_browser_upload_grant(
-                account["id"], item.field, item.filename,
-                content_type, item.size_bytes,
-            ))
-        return {"enabled": True, "items": grants}
-    relay = upload_relay()
-    if relay == "":
-        # Relays are configured but none is healthy: the browser sends the files to this API instead.
-        return {"enabled": False, "items": []}
+    # Browser files must go straight to the Guangzhou Tencent host. Fail
+    # closed if that path is unavailable; never issue COS/relay or API-proxy
+    # upload grants as a fallback.
+    if (
+        transfer_backend() != "local"
+        or os.getenv("H3_LOCAL_DIRECT_UPLOADS", "0").strip() != "1"
+        or not os.getenv("H3_UPLOAD_BASE_URL", "").strip()
+    ):
+        raise HTTPException(503, "腾讯云直传暂不可用，请稍后重试")
     grants = []
     for item in request.files:
         content_type = _canonical_content_type(item.field, item.filename, item.content_type)
         if not content_type.startswith(expected[item.field] + "/"):
             raise HTTPException(422, f"{item.field} 的文件类型不正确")
-        grant = create_upload_grant(
-            account["id"], item.field, item.filename, content_type, item.size_bytes
-        )
-        if relay:
-            payload = {key: value for key, value in grant.items() if key != "upload_url"}
-            token = base64.urlsafe_b64encode(
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-            ).decode().rstrip("=")
-            grant["upload_url"] = f"{relay}/upload?token={token}"
-            grant["chunk_bytes"] = 4 * 1024 * 1024
-            grant["parallelism"] = 4
-        grants.append(grant)
+        grants.append(create_browser_upload_grant(
+            account["id"], item.field, item.filename,
+            content_type, item.size_bytes,
+        ))
     return {"enabled": True, "items": grants}
 
 
@@ -859,6 +853,7 @@ async def create_digital_human(
 @router.post("/api/account/remix/720p", status_code=202, include_in_schema=False)
 @router.post("/api/account/remix2/720p", status_code=202, include_in_schema=False)
 @router.post("/api/account/commerce-remix/720p", status_code=202, include_in_schema=False)
+@router.post("/api/account/commerce-remix/1080p", status_code=202, include_in_schema=False)
 @router.post("/api/account/video-edits/720p", status_code=202, include_in_schema=False)
 @router.post("/v1/remix/text/720p", status_code=202)
 @router.post("/v1/remix/image/720p", status_code=202)
@@ -900,6 +895,8 @@ async def create_video(
         request.url.path.startswith("/api/account/remix/") and not prompt
     )
     is_video_editor = request.url.path.startswith("/api/account/video-edits/")
+    if is_video_editor:
+        raise HTTPException(503, "视频编辑暂不开放，恢复后再试")
     is_remix = request.url.path.startswith(("/api/account/remix/", "/api/account/remix2/", "/api/account/commerce-remix/", "/api/account/video-edits/", "/v1/remix/"))
     is_direct_remix = request.url.path.startswith("/v1/remix/")
     remix = None
@@ -954,7 +951,7 @@ async def create_video(
             remix.update({"source_seconds": remix["source_seconds"], "mode": "commerce_depth",
                           "finalize_original_audio": True, "version": 3})
             title = "电商复刻"
-            task_price_milli = commerce_remix_price_milli()
+            task_price_milli = commerce_remix_price_milli(quality)
             shrink_reference = False
         elif is_simple_portal_remix:
             if kind != "reference" or uploads or upload_fields or first_frame or last_frame or audios:
@@ -1049,10 +1046,10 @@ async def create_video(
             title = "视频编辑"
             task_price_milli = remix_price_milli(quality)
     if kind not in ALLOWED_KINDS:
-        raise HTTPException(422, "kind 必须是 text、image 或 reference")
+        raise HTTPException(422, "kind 必须是 text、image、reference 或 image-edit")
     if (duration not in ALLOWED_DURATION and not (is_video_editor and duration >= 5)):
         raise HTTPException(422, "duration 只能是 5–15 秒之间的整数")
-    if ratio not in {"16:9", "9:16"}:
+    if ratio not in ({"16:9", "9:16", "1:1", "4:3", "3:4"} if is_commerce_remix else {"16:9", "9:16"}):
         raise HTTPException(422, "ratio 只能是 16:9 或 9:16")
     # Legacy portal callers may omit an instruction; the fixed remix wrapper
     # supplies the actual H3 direction. Generic video-editor requests reject
@@ -1574,9 +1571,21 @@ def _list_for(
         params.append(status)
     if tool is not None:
         tools = [item.strip() for item in tool.split(",") if item.strip()][:5] or [tool]
-        where += (" AND COALESCE(json_extract(t.payload,'$._tool'),'video') IN ("
-                  + ",".join("?" * len(tools)) + ")")
-        params.extend(tools)
+        regular_tools = [item for item in tools if item != "commerce_remix"]
+        tool_clauses = []
+        if regular_tools:
+            tool_clauses.append(
+                "COALESCE(json_extract(t.payload,'$._tool'),'video') IN ("
+                + ",".join("?" * len(regular_tools)) + ")"
+            )
+            params.extend(regular_tools)
+        if "commerce_remix" in tools:
+            tool_clauses.append(
+                "(json_extract(t.payload,'$._tool')='commerce_remix' OR "
+                "(json_extract(t.payload,'$._tool')='remix' AND "
+                "json_extract(t.payload,'$._remix.commerce_depth_worker')=1))"
+            )
+        where += " AND (" + " OR ".join(tool_clauses) + ")"
     params.append(limit)
     with connect() as db:
         rows = db.execute(

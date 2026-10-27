@@ -177,6 +177,7 @@ class Runner:
         self.billing = 0.0
         self._lock = asyncio.Lock()
         self.load()
+        self.ledger.merchant_id = self.row["merchant_id"]
 
     # persistence -------------------------------------------------------------------
     @property

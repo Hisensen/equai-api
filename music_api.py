@@ -15,7 +15,10 @@ from starlette.responses import FileResponse
 
 from database import connect, public_id, reserve_task, transaction
 from security import portal_merchant
-from video_api import _remove_uploaded_inputs, _task_view, _upload
+from video_api import (
+    _remove_uploaded_inputs, _task_view, _upload,
+    direct_assets_as_uploads, _uploads_named,
+)
 import local_storage
 
 router = APIRouter(tags=["music-generation"])
@@ -73,7 +76,8 @@ def music_status(merchant: Annotated[dict, Depends(portal_merchant)]) -> dict:
 @router.post("/api/account/music", status_code=202)
 async def create_music(
     merchant: Annotated[dict, Depends(portal_merchant)],
-    source: UploadFile = File(...),
+    source: UploadFile | None = File(None),
+    direct_assets: str = Form(""),
     style: str = Form("摇滚"),
     voice: str = Form("不指定"),
     prompt: str = Form(""),
@@ -82,6 +86,18 @@ async def create_music(
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict:
     _require_music(str(merchant["id"]))
+    if direct_assets:
+        if source is not None and source.filename:
+            raise HTTPException(422, "音乐素材不能同时使用直传和 multipart 上传")
+        _staged, staged = await direct_assets_as_uploads(
+            merchant["id"], "reference", direct_assets,
+        )
+        audio_files = _uploads_named(staged, "audios")
+        if len(audio_files) != 1:
+            raise HTTPException(422, "音乐编辑需要一段音频")
+        source = audio_files[0]
+    if source is None or not source.filename:
+        raise HTTPException(422, "请选择音频文件")
     safe = Path(source.filename or "source.mp3").name[:180]
     if Path(safe).suffix.lower() not in ALLOWED_EXTENSIONS:
         raise HTTPException(422, "请上传 MP3、WAV 或 MP4 音频文件")
